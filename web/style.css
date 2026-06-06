@@ -235,6 +235,8 @@ main { padding: 20px 22px 60px; }
 .bubble.user { align-self: flex-end; background: var(--accent2); color: #08233f; border-bottom-right-radius: 4px; }
 .bubble.assistant { align-self: flex-start; background: var(--bg2); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
 .bubble.thinking { color: var(--muted); font-style: italic; }
+.chat-recs { align-self: stretch; margin: 2px 0 6px; }
+.chat-recs .rec { background: var(--bg3); }
 .chat-input-row { display: flex; gap: 8px; align-items: flex-end; padding-top: 10px; border-top: 1px solid var(--line); }
 .chat-input { flex: 1; resize: none; max-height: 160px; background: var(--bg2); border: 1px solid var(--line); color: var(--text); border-radius: var(--radius); padding: 10px 12px; font-size: 14px; font-family: inherit; }
 .btn.mic { font-size: 18px; padding: 8px 12px; }

@@ -375,10 +375,17 @@ lesser-known/older gems (they have exhausted the obvious stuff), and do NOT \
 recommend things they have clearly already seen — if unsure whether they've seen \
 something, just ask. Ask a clarifying question when their mood/constraints are vague.
 
-YOU CAN TAKE ACTIONS. When the user asks to add/rate/log titles, or to put \
-something on their watchlist, CALL THE TOOLS — do not just say you did it. \
-Disambiguate remakes by year (e.g. the original 1980s MacGyver is 1985, the \
-reboot is 2016) and pass the year. After tools run, briefly confirm what you did.
+YOU CAN TAKE ACTIONS — USE THE TOOLS, never just answer from your own head:
+- When the user asks for SUGGESTIONS / RECOMMENDATIONS / "what should I watch" / \
+"something like X", you MUST call get_recommendations. Do NOT list titles yourself \
+— the tool runs the real engine that excludes everything already in their library \
+and returns proper cards. Pass a short `vibe` capturing their request (e.g. \
+"80s action-adventure shows like A-Team and MacGyver"), the right `type`, and a count.
+- When the user says they've seen/loved/hated something, call add_watched_titles.
+- When they want to save something for later, call add_to_watchlist.
+Disambiguate remakes by year (original 1980s MacGyver = 1985, reboot = 2016). After \
+get_recommendations runs, give a one-line intro — the cards render below your message, \
+so do NOT re-list the titles.
 
 THEIR TASTE PROFILE:
 - Gravitates to genres: {", ".join(p["liked_genres"]) or "n/a"}
@@ -392,6 +399,22 @@ THEIR TASTE PROFILE:
 
 
 CHAT_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_recommendations",
+            "description": "Generate fresh recommendations through the real engine: it excludes everything already in the user's library or previously suggested, enriches each with poster/genres/IMDb, and returns cards. ALWAYS use this when the user wants suggestions — never invent titles yourself.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "vibe": {"type": "string", "description": "Short summary of what the user wants, e.g. '80s action-adventure shows like A-Team and MacGyver' or 'a slow-burn 70s thriller'."},
+                    "type": {"type": "string", "enum": ["movie", "show", "both"], "description": "What to recommend."},
+                    "count": {"type": "integer", "description": "How many (default 6)."},
+                },
+                "required": ["vibe"],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -508,12 +531,14 @@ def chat(conn, cfg: dict[str, Any], messages: list[dict[str, str]]) -> dict[str,
     ]
 
     actions: list[str] = []
+    recommendations: list[dict[str, Any]] = []  # cards to render in the chat
     model = ""
     for _ in range(4):  # cap tool round-trips
         msg, model = _chat_request(cfg, convo, max_tokens=2500, temperature=0.7, tools=CHAT_TOOLS)
         tool_calls = msg.get("tool_calls") or []
         if not tool_calls:
-            return {"reply": msg.get("content") or "", "model": model, "actions": actions}
+            return {"reply": msg.get("content") or "", "model": model,
+                    "actions": actions, "recommendations": recommendations}
 
         # echo the assistant's tool-call turn back, then append each tool result
         convo.append({"role": "assistant", "content": msg.get("content") or "",
@@ -525,7 +550,18 @@ def chat(conn, cfg: dict[str, Any], messages: list[dict[str, str]]) -> dict[str,
                 args = json.loads(fn.get("arguments") or "{}")
             except json.JSONDecodeError:
                 args = {}
-            if name == "add_watched_titles":
+            if name == "get_recommendations":
+                mtype = args.get("type") if args.get("type") in ("movie", "show", "both") else "both"
+                cnt = max(1, min(int(args.get("count") or 6), 15))
+                res = recommend(conn, cfg, cnt, mtype, args.get("vibe"))
+                recommendations += res.get("recommendations", [])
+                names = [r["title"] for r in res.get("recommendations", [])]
+                result_text = (
+                    f"Generated {len(names)} recommendations (already filtered against "
+                    f"the user's library + past suggestions); cards are shown to the user: "
+                    + "; ".join(names)
+                ) if names else "No new picks (everything matched was already in their library)."
+            elif name == "add_watched_titles":
                 res = _exec_add_watched(conn, cfg, args.get("titles", []))
                 actions += [f"Rated: {r}" for r in res]
                 result_text = "Added & rated: " + "; ".join(res) if res else "Nothing added."
@@ -539,14 +575,20 @@ def chat(conn, cfg: dict[str, Any], messages: list[dict[str, str]]) -> dict[str,
                           "content": result_text})
 
     # Fell out of the loop still wanting tools — return a graceful summary
-    return {"reply": "Done." if actions else "I wasn't able to finish that.",
-            "model": model, "actions": actions}
+    return {"reply": "Done." if (actions or recommendations) else "I wasn't able to finish that.",
+            "model": model, "actions": actions, "recommendations": recommendations}
 
 
 def recommend(conn, cfg: dict[str, Any], count: int, media_type: str,
               vibe: str | None) -> dict[str, Any]:
-    """Full pipeline: prompt -> OpenRouter -> parse -> TMDB enrich -> dedupe -> store."""
-    prompt = build_prompt(conn, count, media_type, vibe)
+    """Full pipeline: prompt -> OpenRouter -> parse -> TMDB enrich -> dedupe -> store.
+
+    Over-fetches so that titles already in the library (which dedupe drops) don't
+    leave us with too few — important for big libraries where a narrow ask would
+    otherwise come back empty.
+    """
+    overfetch = min(count + 10, 25)
+    prompt = build_prompt(conn, overfetch, media_type, vibe)
     content, model = call_openrouter(cfg, prompt)
     try:
         parsed = parse_recommendations(content)
@@ -559,7 +601,7 @@ def recommend(conn, cfg: dict[str, Any], count: int, media_type: str,
         ) from exc
     # Enrich first so dedupe uses TMDB's canonical titles (better dup detection).
     enrich_recs(cfg, parsed)
-    fresh = dedupe_and_flag(conn, parsed)
+    fresh = dedupe_and_flag(conn, parsed)[:count]  # trim to what the user asked for
     ids = db.add_recommendations(conn, fresh, source=f"openrouter:{model}")
     stored = db.list_recommendations(conn, status="new")
     by_id = {r["id"]: r for r in stored}
