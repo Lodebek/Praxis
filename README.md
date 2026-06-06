@@ -189,3 +189,16 @@ If you fork this, double-check `git status` before your first commit to confirm
 
 ## Tech
 Python 3.11+ · FastAPI · SQLite · vanilla JS. No build step.
+
+## Credits & attribution
+
+- Film & TV metadata and posters from **[The Movie Database (TMDB)](https://www.themoviedb.org/)**.
+  This product uses the TMDB API but is not endorsed or certified by TMDB.
+- Library data comes from your own **Plex Media Server** (Plex is a trademark of
+  Plex, Inc.; this project is not affiliated with or endorsed by Plex).
+- AI recommendations via **[OpenRouter](https://openrouter.ai/)**.
+- Netflix import reads *your own* exported viewing history — no Netflix affiliation.
+
+## License
+
+[MIT](LICENSE).
