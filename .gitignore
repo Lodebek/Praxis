@@ -1,0 +1,25 @@
+# Secrets & local config
+config.json
+
+# Personal data — viewing-history / ratings exports should never be published
+*.csv
+NetflixViewingHistory*.csv
+
+# Local database
+data/
+*.db
+*.sqlite
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
