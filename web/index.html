@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Praxis</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <h1>Praxis</h1>
+      <span class="tagline">your taste, mined from Plex</span>
+    </div>
+    <nav class="tabs">
+      <button class="tab active" data-tab="rate">Rate</button>
+      <button class="tab" data-tab="discover">Discover</button>
+      <button class="tab" data-tab="chat">Chat</button>
+      <button class="tab" data-tab="watchlist">Watchlist</button>
+      <button class="tab" data-tab="add">Add / Import</button>
+      <button class="tab" data-tab="stats">Stats</button>
+    </nav>
+    <div class="status">
+      <span id="plex-status" class="dot" title="Plex status">●</span>
+      <button id="sync-btn" class="btn">Sync Plex</button>
+    </div>
+  </header>
+
+  <div id="stale-banner" class="stale-banner hidden">
+    ⚠ Praxis was updated. <b>Hard-refresh this page (Ctrl+Shift+R)</b>, and if actions
+    still fail, restart the server: Ctrl+C in its terminal, then <code>python run.py</code>.
+  </div>
+
+  <main>
+    <!-- ============================ RATE ============================ -->
+    <section id="rate" class="panel active">
+      <div class="toolbar">
+        <div class="filters" id="status-filters">
+          <button class="chip active" data-status="unrated">Unrated</button>
+          <button class="chip" data-status="loved">👍👍 Loved</button>
+          <button class="chip" data-status="liked">👍 Liked</button>
+          <button class="chip" data-status="disliked">👎 Nope</button>
+          <button class="chip" data-status="all">All</button>
+        </div>
+        <div class="filters" id="type-filters">
+          <button class="chip active" data-type="">Both</button>
+          <button class="chip" data-type="movie">Movies</button>
+          <button class="chip" data-type="show">TV</button>
+        </div>
+        <div class="filters" id="source-filters">
+          <button class="chip active" data-source="">All sources</button>
+          <button class="chip" data-source="plex">Plex</button>
+          <button class="chip" data-source="netflix">Netflix</button>
+          <button class="chip" data-source="manual">Added</button>
+        </div>
+        <select id="sort-select" class="sort-select" title="Sort">
+          <option value="title">Title A–Z</option>
+          <option value="year_desc">Year — newest first</option>
+          <option value="year_asc">Year — oldest first</option>
+          <option value="added">Recently added</option>
+          <option value="rated">Recently rated</option>
+          <option value="random">Random shuffle</option>
+        </select>
+        <input id="search" class="search" type="search" placeholder="Search title…" />
+      </div>
+      <div class="progress-row">
+        <div class="progress"><div id="progress-bar" class="progress-fill"></div></div>
+        <span id="progress-text" class="muted"></span>
+        <span class="muted kbd-hint">keys: 2 love · 1 like · 3 nope · 0 clear · n next</span>
+      </div>
+      <div id="grid" class="grid"></div>
+      <div id="rate-empty" class="empty hidden"></div>
+    </section>
+
+    <!-- ========================== DISCOVER ========================= -->
+    <section id="discover" class="panel">
+      <div id="taste-summary" class="taste-summary muted"></div>
+
+      <div class="discover-controls">
+        <label>How many
+          <input id="rec-count" type="number" min="1" max="25" value="8" />
+        </label>
+        <label>Type
+          <select id="rec-type">
+            <option value="both">Movies + TV</option>
+            <option value="movie">Movies</option>
+            <option value="show">TV shows</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="discover-section">
+        <div class="discover-label">Narrow by genre <span class="muted">(optional — pick any)</span></div>
+        <div class="filters wrap" id="genre-chips"></div>
+      </div>
+
+      <div class="discover-section">
+        <div class="discover-label">Mood / twist <span class="muted">(optional)</span></div>
+        <div class="filters wrap" id="mood-chips"></div>
+      </div>
+
+      <label class="discover-vibe">Anything specific? <span class="muted">(optional)</span>
+        <input id="rec-vibe" type="text" placeholder="e.g. like Andor but lighter, or a slow-burn 70s thriller" />
+      </label>
+
+      <div class="discover-buttons">
+        <button id="recommend-btn" class="btn primary">Get recommendations</button>
+        <button id="surprise-btn" class="btn">🎲 Surprise me</button>
+        <span id="discover-hint" class="muted"></span>
+      </div>
+
+      <details class="advanced-block">
+        <summary>No OpenRouter key? Use Claude manually instead</summary>
+        <p class="muted">You have a key, so you don't need this. It builds the same prompt to paste into a Claude chat by hand, then paste the answer back.</p>
+        <div class="discover-secondary">
+          <button id="copy-prompt-btn" class="btn">Copy prompt for Claude</button>
+          <div class="paste-block">
+            <textarea id="import-text" placeholder="Paste the JSON array Claude returned…"></textarea>
+            <button id="import-btn" class="btn">Import recommendations</button>
+          </div>
+        </div>
+      </details>
+
+      <div id="discover-msg" class="msg"></div>
+      <div id="discover-results" class="rec-list"></div>
+    </section>
+
+    <!-- ============================ CHAT =========================== -->
+    <section id="chat" class="panel">
+      <div class="chat-wrap">
+        <div id="chat-log" class="chat-log">
+          <div class="chat-hint muted">Talk to Praxis — it knows your ratings. Try
+            "what's a short, funny thing for tonight?" or "I'm in the mood for a
+            paranoid 70s thriller."</div>
+        </div>
+        <div class="chat-input-row">
+          <button id="mic-btn" class="btn mic" title="Voice input">🎤</button>
+          <textarea id="chat-input" class="chat-input" rows="1"
+            placeholder="Ask for something to watch…"></textarea>
+          <button id="chat-send" class="btn primary">Send</button>
+          <button id="chat-clear" class="btn" title="Clear conversation">Clear</button>
+        </div>
+        <details id="mic-diag" class="mic-diag">
+          <summary>🔬 Microphone diagnostics</summary>
+          <div class="mic-diag-actions">
+            <button id="mic-test-btn" class="btn">Run mic test</button>
+            <button id="mic-copy-btn" class="btn">Copy log</button>
+            <button id="mic-clearlog-btn" class="btn">Clear log</button>
+          </div>
+          <pre id="mic-log" class="mic-log">No mic events yet. Click "Run mic test", or click the 🎤 and watch here.</pre>
+        </details>
+      </div>
+    </section>
+
+    <!-- ========================= WATCHLIST ========================= -->
+    <section id="watchlist" class="panel">
+      <div class="filters" id="rec-status-filters">
+        <button class="chip active" data-rstatus="queued">📌 Want to Watch</button>
+        <button class="chip" data-rstatus="watched">Seen</button>
+        <button class="chip" data-rstatus="dismissed">Dismissed</button>
+        <button class="chip" data-rstatus="new">Unsorted suggestions</button>
+        <button class="chip" data-rstatus="all">All</button>
+      </div>
+      <div id="watchlist-list" class="rec-list"></div>
+    </section>
+
+    <!-- ========================== ADD / IMPORT ===================== -->
+    <section id="add" class="panel">
+      <div class="add-grid">
+        <div class="add-card">
+          <h3>Add a title you watched elsewhere</h3>
+          <p class="muted">For stuff not in Plex — Hulk Hogan on Hulk, Wrexham on
+            Hulu, anything. It feeds your taste profile and gets excluded from future picks.</p>
+          <div class="add-form">
+            <label>Title
+              <div class="input-with-mic">
+                <input id="add-title" type="text" placeholder="The A-Team" />
+                <button id="add-mic" class="btn mic" type="button" title="Voice input">🎤</button>
+              </div>
+            </label>
+            <div class="add-row">
+              <label>Type
+                <select id="add-type">
+                  <option value="show">TV show</option>
+                  <option value="movie">Movie</option>
+                </select>
+              </label>
+              <label>Year (optional)<input id="add-year" type="number" min="1900" max="2099" placeholder="2022" /></label>
+            </div>
+            <label>Your verdict
+              <select id="add-verdict">
+                <option value="">— rate later —</option>
+                <option value="loved">👍👍 Loved it</option>
+                <option value="liked">👍 Liked it</option>
+                <option value="disliked">👎 Nope</option>
+              </select>
+            </label>
+            <label>Note (optional)<input id="add-note" type="text" placeholder="great first 2 seasons…" /></label>
+            <button id="add-submit" class="btn primary">Add title</button>
+            <div id="add-msg" class="msg"></div>
+          </div>
+        </div>
+
+        <div class="add-card">
+          <h3>Import Netflix history</h3>
+          <p class="muted">Upload your <code>NetflixViewingHistory.csv</code> (Account →
+            "Download your personal information"). Episodes collapse to show titles;
+            everything imports as watched so it won't be re-recommended.</p>
+          <div class="add-form">
+            <input id="netflix-file" type="file" accept=".csv" />
+            <button id="netflix-submit" class="btn primary">Import CSV</button>
+            <div id="netflix-msg" class="msg"></div>
+          </div>
+        </div>
+
+        <div class="add-card">
+          <h3>Enrich metadata (TMDB)</h3>
+          <p class="muted">Imported titles start bare (no year/genre/poster). This
+            looks each up on <strong>The Movie Database</strong> — the same source
+            Plex uses — to fill in year, genres, summary, posters, and fix any
+            movie/show mislabels. Needs your <code>tmdb.read_access_token</code>
+            (themoviedb.org → Settings → API).</p>
+          <div class="add-form">
+            <div id="enrich-status" class="muted"></div>
+            <div class="progress"><div id="enrich-bar" class="progress-fill"></div></div>
+            <button id="enrich-btn" class="btn primary">Enrich now</button>
+            <div id="enrich-msg" class="msg"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- =========================== STATS =========================== -->
+    <section id="stats" class="panel">
+      <div id="stats-content" class="stats-grid"></div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

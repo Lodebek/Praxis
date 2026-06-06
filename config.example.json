@@ -1,0 +1,29 @@
+{
+  "plex": {
+    "base_url": "http://localhost:32400",
+    "token": "",
+    "movie_section": 1,
+    "show_section": 2,
+    "sync_on_start": true
+  },
+  "openrouter": {
+    "api_key": "",
+    "model": "google/gemini-2.5-pro",
+    "max_tokens": 4000,
+    "reasoning_effort": "low",
+    "site_url": "http://localhost:8765",
+    "app_name": "Praxis"
+  },
+  "tmdb": {
+    "_note": "TMDB credentials. The app uses read_access_token (v4 Bearer) by default and only falls back to api_key (v3 query param) if the token is blank. Both are kept here so the API key is on hand if a future feature needs the v3-only flow. Get both at themoviedb.org -> Settings -> API.",
+    "read_access_token": "",
+    "_read_access_token_note": "PREFERRED. v4 'API Read Access Token'. Sent as 'Authorization: Bearer <token>'. Works across v3 + v4 endpoints. This is the one enrichment uses.",
+    "api_key": "",
+    "_api_key_note": "OPTIONAL / FUTURE. Legacy v3 'API Key'. Sent as ?api_key=. Not needed today; only used if read_access_token is empty. Keep it here so we don't have to hunt it down later."
+  },
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8765,
+    "open_browser": true
+  }
+}
