@@ -10,17 +10,30 @@ your API keys live only in `config.json` (git-ignored — see [Privacy](#privacy
 
 ## Screenshots
 
-> _Add your own screenshots to `docs/screenshots/` (the repo references the files
-> below). They'll render here once present._
+### Rate — thumb through your whole library
+One-click verdicts (👍👍 / 👍 / 👎). Filter by source (Plex / Netflix / Added), sort by year/added/rated, or shuffle for variety.
 
-| Discover | Rate |
-|---|---|
-| ![Discover tab](docs/screenshots/discover.png) | ![Rate tab](docs/screenshots/rate.png) |
+![Rate tab](docs/screenshots/Screenshot%202026-06-06%20152017.png)
 
-| Watchlist | Chat |
-|---|---|
-| ![Watchlist tab](docs/screenshots/watchlist.png) | ![Chat tab](docs/screenshots/chat.png) |
+### Discover — recommendations tuned to your taste
+Pick genres and a mood, add a vibe, or just hit **Surprise me**. Every pick is a card with poster, genres, IMDb/TMDB links, and 👍 / 📌 Watch-later / ✕ Dismiss.
 
+![Discover tab](docs/screenshots/Screenshot%202026-06-06%20152214.png)
+
+### Watchlist — the stuff you chose to watch later
+Your **Want to Watch** queue, with separate Seen and Dismissed views. Thumb something here when you finish it and it moves into your rated library.
+
+![Watchlist tab](docs/screenshots/Screenshot%202026-06-06%20152433.png)
+
+### Add / Import — pull in everything you've seen
+Add titles you watched elsewhere (not in Plex), import your Netflix history, and enrich it all with posters/genres/years via TMDB.
+
+![Add / Import tab](docs/screenshots/Screenshot%202026-06-06%20152502.png)
+
+### Chat — talk to your library
+Praxis knows your ratings and what you own. Ask for suggestions and get real cards (library-excluded), or just say *"add Die Hard as loved."*
+
+![Chat tab](docs/screenshots/Screenshot%202026-06-06%20154901.png)
 ## Quick start
 
 ```bash
