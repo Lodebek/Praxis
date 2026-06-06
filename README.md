@@ -6,24 +6,53 @@ A small local app that mines your **Plex** library, lets you rate everything fas
 every recommendation so nothing gets forgotten or suggested twice.
 
 Everything runs locally on your machine. Your Plex token never leaves it, and
-your OpenRouter key lives only in `config.json` (git-ignored).
+your API keys live only in `config.json` (git-ignored — see [Privacy](#privacy)).
+
+## Screenshots
+
+> _Add your own screenshots to `docs/screenshots/` (the repo references the files
+> below). They'll render here once present._
+
+| Discover | Rate |
+|---|---|
+| ![Discover tab](docs/screenshots/discover.png) | ![Rate tab](docs/screenshots/rate.png) |
+
+| Watchlist | Chat |
+|---|---|
+| ![Watchlist tab](docs/screenshots/watchlist.png) | ![Chat tab](docs/screenshots/chat.png) |
 
 ## Quick start
 
-```powershell
+```bash
 # 1. install dependencies (once)
 python -m pip install -r requirements.txt
 
-# 2. add your OpenRouter key
-#    edit config.json -> openrouter.api_key  (replace the placeholder)
-#    (optional — you can skip this and use the "Copy prompt for Claude" path instead)
+# 2. set up your config
+#    copy the template, then fill in your keys:
+#      cp config.example.json config.json   (Windows: copy config.example.json config.json)
+#    - openrouter.api_key        -> for recommendations + chat
+#    - tmdb.read_access_token    -> for posters/metadata enrichment
+#    (both optional to start; see Platforms below for the Plex token)
 
 # 3. run
 python run.py
 ```
 
 Your browser opens to <http://127.0.0.1:8765>. Click **Sync Plex** once to pull
-your library (≈194 movies + 140 shows), then start rating.
+your library, then start rating.
+
+## Platforms
+
+Pure Python + a static web UI (no Node/build step). **Python 3.11+.**
+
+- **Windows:** the Plex token is read automatically from the registry — nothing
+  to configure.
+- **macOS / Linux:** there's no registry, so set the token manually. Grab it from
+  the Plex web app (open any item → ⋯ → *Get Info* → *View XML*; the URL contains
+  `X-Plex-Token=…`) or from `Preferences.xml`, and put it in `config.json` under
+  `plex.token`. Everything else works identically.
+- Adjust `plex.base_url` if your server isn't at `http://localhost:32400`, and
+  `plex.movie_section` / `plex.show_section` if your library section keys differ.
 
 ## How it works
 
@@ -109,8 +138,9 @@ to, and the recommendation funnel.
 | `plex.movie_section` / `plex.show_section` | Library section keys (default 1 / 2) |
 | `plex.sync_on_start` | Re-index Plex automatically on launch (default `true`) |
 | `openrouter.api_key` | Your OpenRouter key (required for in-app recommendations + chat) |
-| `openrouter.model` | Model slug, e.g. `anthropic/claude-opus-4.8` |
+| `openrouter.model` | Model slug, e.g. `google/gemini-2.5-pro` or `anthropic/claude-opus-4.8` |
 | `openrouter.max_tokens` | Output cap per request (default 4000) |
+| `openrouter.reasoning_effort` | `low`/`medium`/`high` thinking budget for reasoning models (default `low` — keeps cost down and avoids empty replies) |
 | `tmdb.read_access_token` | TMDB API Read Access Token (preferred) for metadata enrichment — themoviedb.org → Settings → API |
 | `tmdb.api_key` | Optional legacy v3 key; only used if no read access token is set |
 | `server.port` | Port to serve on (default 8765) |
@@ -130,5 +160,19 @@ data/praxis.db your database (git-ignored, created on first run)
 run.py         launcher
 ```
 
+## Privacy
+Everything is local and personal, and the repo is set up so none of it leaks:
+
+- **API keys** live only in `config.json`, which is **git-ignored**. The committed
+  `config.example.json` has blank placeholders. Never commit `config.json`.
+- **Your ratings & library** live in `data/praxis.db` (git-ignored).
+- **Viewing-history exports** (`*.csv`, e.g. `NetflixViewingHistory.csv`) are
+  git-ignored too.
+- Your Plex token and watch data never leave your machine; only recommendation
+  prompts (your taste profile, no credentials) are sent to OpenRouter.
+
+If you fork this, double-check `git status` before your first commit to confirm
+`config.json` and `data/` are not staged.
+
 ## Tech
-Python 3.11 · FastAPI · SQLite · vanilla JS. No build step.
+Python 3.11+ · FastAPI · SQLite · vanilla JS. No build step.
