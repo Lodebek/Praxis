@@ -8,15 +8,21 @@ Everything runs locally on your machine. Your library data never leaves your com
 
 ## Screenshots
 
-> _Add your own screenshots to `docs/screenshots/` (the repo references the files below). They'll render here once present._
+### The Discover Engine
+![Discover tab](docs/screenshots/discover.png)
+*Builds a personalized prompt from your taste profile and returns fresh recommendations as interactive cards.*
 
-| Discover | Rate |
-|---|---|
-| ![Discover tab](docs/screenshots/discover.png) | ![Rate tab](docs/screenshots/rate.png) |
+### Fast Rating
+![Rate tab](docs/screenshots/rate.png)
+*Rapidly sort and grade your library using a Netflix-style thumbs system to build your profile.*
 
-| Watchlist | Chat |
-|---|---|
-| ![Watchlist tab](docs/screenshots/watchlist.png) | ![Chat tab](docs/screenshots/chat.png) |
+### Watchlist
+![Watchlist tab](docs/screenshots/watchlist.png)
+*Tracks all your pinned recommendations. Rate them as you watch/play/read to feed your memory.*
+
+### AI Chat & Actions
+![Chat tab](docs/screenshots/chat.png)
+*A conversational interface grounded in your exact taste profile. Use it for contextual requests or natural language actions.*
 
 ## Quick Start
 
