@@ -1,6 +1,6 @@
 # Praxis
 
-A small local app that mines your **Plex** library for movies and TV shows, lets you scan your **PC Games** and **E-books**, lets you rate everything fast (Netflix-style thumbs), builds a comprehensive taste profile, and asks an LLM (via your **OpenRouter** account) for fresh movies, shows, games, and books you haven't seen — tracking every recommendation so nothing gets forgotten or suggested twice.
+A small local app that tracks your **movies, TV shows, PC games, and e-books**. It automatically mines your Plex server and local folders, lets you rate everything fast (Netflix-style thumbs), builds a unified taste profile, and asks an LLM (via your **OpenRouter** account) for fresh recommendations you haven't seen — tracking every single one so nothing gets forgotten or suggested twice.
 
 Everything runs locally on your machine. Your Plex token never leaves it, and your API keys live only in `config.json` (git-ignored — see [Privacy](#privacy)).
 
