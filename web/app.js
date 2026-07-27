@@ -5,7 +5,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
 // Bump in lockstep with SERVER_VERSION in praxis/server.py.
-const EXPECTED_SERVER_VERSION = "2026-06-06.2";
+const EXPECTED_SERVER_VERSION = "2026-06-07.1";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -21,7 +21,18 @@ async function api(path, opts = {}) {
       showStaleBanner();
       throw new Error("Server is out of date — stop it and run `python run.py` again.");
     }
-    const detail = (data && data.detail) || res.statusText;
+    // FastAPI validation errors come back as an array/object — never let that
+    // surface as the useless "[object Object]".
+    let detail = (data && data.detail) || res.statusText;
+    if (typeof detail !== "string") {
+      try {
+        if (Array.isArray(detail)) {
+          detail = detail.map((d) => d.msg || JSON.stringify(d)).join("; ");
+        } else {
+          detail = JSON.stringify(detail);
+        }
+      } catch { detail = res.statusText; }
+    }
     throw new Error(detail);
   }
   return data;
@@ -73,6 +84,10 @@ $$(".tab").forEach((tab) => {
   });
 });
 
+$("#nav-new-btn").addEventListener("click", () => {
+  setRateView({ status: "unrated", source: "plex", sort: "added" });
+});
+
 // ----------------------------------------------------------------- health / sync
 async function checkHealth() {
   const dot = $("#plex-status");
@@ -102,8 +117,15 @@ $("#sync-btn").addEventListener("click", async () => {
   btn.innerHTML = '<span class="spinner"></span> Syncing…';
   try {
     const r = await api("/api/sync", { method: "POST" });
-    toast(`Synced ${r.counts.movie} movies + ${r.counts.show} shows`);
-    await loadMedia();
+    const newCount = r.new || 0;
+    if (newCount > 0) {
+      // Jump straight to the newly-added titles: Unrated + newest-first.
+      toast(`${newCount} new title${newCount > 1 ? "s" : ""} added — showing them now`);
+      setRateView({ status: "unrated", source: "", sort: "added" });
+    } else {
+      toast(`Synced ${r.counts.movie} movies + ${r.counts.show} shows — nothing new`);
+      await loadMedia();
+    }
   } catch (e) {
     toast("Sync failed: " + e.message);
   } finally {
@@ -111,6 +133,28 @@ $("#sync-btn").addEventListener("click", async () => {
     btn.textContent = "Sync Plex";
   }
 });
+
+// Programmatically set the Rate-tab filters/sort and reload (used after sync).
+function setRateView({ status, source, sort }) {
+  // switch to the Rate tab
+  $$(".tab").forEach((t) => t.classList.remove("active"));
+  $$(".panel").forEach((p) => p.classList.remove("active"));
+  $('.tab[data-tab="rate"]').classList.add("active");
+  $("#rate").classList.add("active");
+  if (status !== undefined) {
+    state.status = status;
+    $$("#status-filters .chip").forEach((c) => c.classList.toggle("active", c.dataset.status === status));
+  }
+  if (source !== undefined) {
+    state.source = source;
+    $$("#source-filters .chip").forEach((c) => c.classList.toggle("active", c.dataset.source === source));
+  }
+  if (sort !== undefined) {
+    state.sort = sort;
+    $("#sort-select").value = sort;
+  }
+  loadMedia();
+}
 
 // ----------------------------------------------------------------- RATE tab
 $$("#status-filters .chip").forEach((chip) =>
@@ -196,21 +240,28 @@ function cardHTML(m, i) {
     ? (m.thumb.startsWith("http") ? m.thumb : "/api/thumb/" + encodeURIComponent(m.ratingKey))
     : null;
   const poster = src
-    ? `<img class="poster" loading="lazy" src="${esc(src)}" alt="" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'poster placeholder',textContent:${JSON.stringify(m.title)}}))" />`
+    ? `<img class="poster" loading="lazy" src="${esc(src)}" alt="" data-title="${esc(m.title)}" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'poster placeholder',textContent:this.getAttribute('data-title')}))" />`
     : `<div class="poster placeholder">${esc(m.title)}</div>`;
+  const typeName = m.type === "show" ? "TV" : (m.type === "book" ? "BOOK" : (m.type === "game" ? "GAME" : "MOVIE"));
   const badge = m.source && m.source !== "plex"
     ? `<span class="src-badge">${m.source === "netflix" ? "Netflix" : "Added"}</span>` : "";
+  const typeBadge = `<span class="src-badge" style="right: 6px; left: auto; background: rgba(0,0,0,0.65); border-color: var(--text); color: var(--text);">${typeName}</span>`;
   return `
   <div class="card" data-key="${esc(m.ratingKey)}" data-index="${i}">
     ${badge}
+    ${typeBadge}
+    <button class="delete-btn" title="Delete from library" data-key="${esc(m.ratingKey)}" style="position: absolute; top: 6px; left: 6px; z-index: 10; background: rgba(0,0,0,0.65); border: 1px solid var(--border); color: #ff4444; border-radius: 4px; padding: 2px 6px; cursor: pointer;">❌</button>
     ${poster}
     <div class="card-body">
       <div class="card-title">${esc(m.title)}</div>
-      <div class="card-meta">${m.year || ""}${m.type === "show" ? " · TV" : ""}${genres ? " · " + esc(genres) : ""}</div>
+      <div class="card-meta">${m.year || ""}${m.author ? " · by " + esc(m.author) : ""}${genres ? " · " + esc(genres) : ""}</div>
       <div class="verdicts">
+        ${v === "ignore" ? `<button class="btn restore-btn" style="padding: 0.2rem 0.5rem; background: var(--border);">Restore</button>` : `
         <button class="verdict-btn loved ${v === "loved" ? "active" : ""}" data-v="loved" title="Love it (2)">👍👍</button>
         <button class="verdict-btn liked ${v === "liked" ? "active" : ""}" data-v="liked" title="Like it (1)">👍</button>
         <button class="verdict-btn disliked ${v === "disliked" ? "active" : ""}" data-v="disliked" title="Nope (3)">👎</button>
+        `}
+        <button class="btn chat-about-btn" data-title="${esc(m.title)}" title="Chat about this" style="padding: 0.2rem 0.5rem; margin-left: 0.5rem;">💬</button>
       </div>
       <textarea class="note-input" placeholder="note (optional)…" data-key="${esc(m.ratingKey)}">${esc(m.note || "")}</textarea>
     </div>
@@ -227,6 +278,10 @@ function bindCards() {
         const next = cur === btn.dataset.v ? null : btn.dataset.v; // toggle off
         rate(key, next);
       }));
+    const restore = $(".restore-btn", card);
+    if (restore) {
+        restore.addEventListener("click", () => rate(key, null));
+    }
     const note = $(".note-input", card);
     note.addEventListener("blur", () => {
       const m = state.items.find((x) => x.ratingKey === key);
@@ -235,6 +290,19 @@ function bindCards() {
       // saving a note only matters if there's a verdict; keep verdict as-is
       rate(key, m.verdict, note.value, true);
     });
+    const del = $(".delete-btn", card);
+    if (del) {
+        del.addEventListener("click", async (e) => {
+            e.stopPropagation();
+            try {
+                await api("/api/rate", { method: "POST", body: JSON.stringify({ ratingKey: key, verdict: "ignore" }) });
+                card.remove();
+                state.items = state.items.filter(m => m.ratingKey !== key);
+            } catch(err) {
+                toast("Hide failed: " + err.message);
+            }
+        });
+    }
   });
 }
 
@@ -249,14 +317,19 @@ async function rate(key, verdict, note = undefined, silent = false) {
     // update buttons in place
     const card = $(`.card[data-key="${CSS.escape(key)}"]`);
     if (card) {
-      $$(".verdict-btn", card).forEach((b) =>
-        b.classList.toggle("active", b.dataset.v === r.item.verdict));
+      if (r.item.verdict === "ignore" || (m && m.verdict === "ignore")) {
+        // If transitioning into or out of "ignore", the DOM changes structurally
+        renderGrid();
+      } else {
+        $$(".verdict-btn", card).forEach((b) =>
+          b.classList.toggle("active", b.dataset.v === r.item.verdict));
+      }
     }
     if (!silent) {
       // if filtering by unrated and we just rated, drop it from view
       if (state.status === "unrated" && r.item.verdict) {
         removeCard(key);
-      } else if (["loved", "liked", "disliked"].includes(state.status) &&
+      } else if (["loved", "liked", "disliked", "ignore"].includes(state.status) &&
                  r.item.verdict !== state.status) {
         removeCard(key);
       }
@@ -514,7 +587,8 @@ function recHTML(r) {
     ? `Seen · ${({ loved: "👍👍 Loved", liked: "👍 Liked", disliked: "👎 Nope" })[r.user_verdict] || r.user_verdict}`
     : (STATUS_LABEL[r.status] || r.status);
   const badge = `<span class="status-badge ${r.status}">${stateText}</span>`;
-  const type = r.type ? `<span class="type-badge">${r.type === "show" ? "TV" : "movie"}</span>` : "";
+  const typeName = r.type === "show" ? "TV" : (r.type === "book" ? "book" : (r.type === "game" ? "game" : "movie"));
+  const type = r.type ? `<span class="type-badge">${typeName.toUpperCase()}</span>` : "";
   const genres = (r.genres || []).slice(0, 3).join(" · ");
   const poster = r.thumb
     ? `<img class="rec-poster" loading="lazy" src="${esc(r.thumb)}" alt="" onerror="this.style.display='none'" />`
@@ -524,6 +598,7 @@ function recHTML(r) {
     ${poster}
     <div class="rec-main">
       <h3>${esc(r.title)} ${r.year ? `<span class="yr">(${r.year})</span>` : ""}${type}</h3>
+      ${r.author ? `<div class="rec-author muted">by ${esc(r.author)}</div>` : ""}
       ${genres ? `<div class="rec-genres muted">${esc(genres)}</div>` : ""}
       ${r.reason ? `<div class="reason">${esc(r.reason)}</div>` : ""}
       ${r.where_to_watch ? `<div class="watch">▶ ${esc(r.where_to_watch)}</div>` : ""}
@@ -537,6 +612,7 @@ function recHTML(r) {
         <button class="verdict-btn liked ${r.user_verdict === "liked" ? "active" : ""}" data-verdict="liked" title="Seen it — liked it">👍</button>
         <button class="verdict-btn disliked ${r.user_verdict === "disliked" ? "active" : ""}" data-verdict="disliked" title="Seen it — nope">👎</button>
       </div>
+      <button class="btn chat-about-btn" data-title="${esc(r.title)}" title="Chat about this">💬</button>
       <button class="btn ${r.status === "queued" ? "primary" : ""}" data-action="queued">📌 Watch later</button>
       <button class="btn" data-action="dismissed">✕ Dismiss</button>
     </div>
@@ -596,6 +672,24 @@ async function loadStats() {
   }
 }
 
+$("#analyze-taste-btn")?.addEventListener("click", async () => {
+  const btn = $("#analyze-taste-btn");
+  const out = $("#taste-analysis-output");
+  const original = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Analyzing...';
+  out.innerHTML = "";
+  try {
+    const r = await api("/api/stats/analyze", { method: "POST" });
+    out.innerHTML = esc(r.analysis).replace(/\n/g, "<br>");
+  } catch (e) {
+    out.innerHTML = `<span class="error">${esc(e.message)}</span>`;
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = original;
+  }
+});
+
 function bars(obj, max) {
   const m = max || Math.max(1, ...Object.values(obj));
   return Object.entries(obj)
@@ -645,9 +739,51 @@ function statsHTML(s, p) {
 
 // ----------------------------------------------------------------- CHAT tab
 let chatHistory = []; // {role, content}
+let currentSessionId = null;
+
+async function loadChatSessions() {
+  const ul = $("#chat-history-list");
+  if (!ul) return;
+  try {
+    const data = await api("/api/chat/sessions");
+    ul.innerHTML = data.sessions.map((s) => `
+      <li data-id="${s.id}" class="${s.id === currentSessionId ? 'active' : ''}">
+        ${esc(s.title)}
+      </li>
+    `).join("");
+    $$("li", ul).forEach(li => li.addEventListener("click", () => switchSession(li.dataset.id)));
+  } catch(e) {
+    console.error("Failed to load chat sessions", e);
+  }
+}
+
+async function switchSession(id) {
+  currentSessionId = id;
+  const log = $("#chat-messages");
+  log.innerHTML = '<div class="empty">Loading...</div>';
+  try {
+    const data = await api(`/api/chat/sessions/${id}`);
+    chatHistory = data.messages;
+    renderChat();
+    loadChatSessions(); // refresh active state
+  } catch(e) {
+    log.innerHTML = `<div class="empty error">${esc(e.message)}</div>`;
+  }
+}
+
+$("#new-chat-btn")?.addEventListener("click", () => {
+  currentSessionId = null;
+  chatHistory = [];
+  renderChat();
+  loadChatSessions();
+});
+
+// Call this once on load
+loadChatSessions();
 
 function renderChat() {
-  const log = $("#chat-log");
+  const log = $("#chat-messages");
+  if (!log) return;
   log.innerHTML = "";
   if (!chatHistory.length) {
     log.innerHTML = '<div class="chat-hint muted">Talk to Praxis — it knows your ratings and your library. Try "suggest some 80s action shows I haven\'t seen" or "add Die Hard as loved".</div>';
@@ -655,7 +791,7 @@ function renderChat() {
   }
   chatHistory.forEach((m) => {
     const bubble = document.createElement("div");
-    bubble.className = "bubble " + m.role;
+    bubble.className = "chat-bubble " + m.role;
     bubble.textContent = m.content;
     log.appendChild(bubble);
     // Recommendation cards generated by the chat render right under the message.
@@ -669,28 +805,36 @@ function renderChat() {
   log.scrollTop = log.scrollHeight;
 }
 
-async function sendChat() {
+async function sendChat(forceText = null) {
   const input = $("#chat-input");
-  const text = input.value.trim();
+  const text = forceText !== null ? forceText : input.value.trim();
   if (!text) return;
   chatHistory.push({ role: "user", content: text });
   input.value = "";
   input.style.height = "auto";
   renderChat();
-  const log = $("#chat-log");
+  
+  const log = $("#chat-messages");
   const thinking = document.createElement("div");
-  thinking.className = "bubble assistant thinking";
+  thinking.className = "chat-bubble assistant thinking";
   thinking.textContent = "thinking…";
   log.appendChild(thinking);
   log.scrollTop = log.scrollHeight;
   $("#chat-send").disabled = true;
+  
   try {
-    const r = await api("/api/chat", {
+    if (!currentSessionId) {
+      const initR = await api("/api/chat/sessions", { method: "POST" });
+      currentSessionId = initR.session_id;
+    }
+    const r = await api(`/api/chat/sessions/${currentSessionId}/message`, {
       method: "POST",
-      body: JSON.stringify({ messages: chatHistory }),
+      body: JSON.stringify({ content: text }),
     });
     chatHistory.push({ role: "assistant", content: r.reply, recs: r.recommendations || [] });
     renderChat();
+    loadChatSessions(); // Update titles in sidebar
+    
     // If the chat took actions (added/rated/queued titles), reflect it everywhere.
     if (r.actions && r.actions.length) {
       toast(r.actions.length + " change" + (r.actions.length > 1 ? "s" : "") + " applied");
@@ -706,20 +850,35 @@ async function sendChat() {
   }
 }
 
-$("#chat-send").addEventListener("click", sendChat);
-$("#chat-input").addEventListener("keydown", (e) => {
+$("#chat-send")?.addEventListener("click", () => sendChat());
+$("#chat-input")?.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); }
 });
-$("#chat-input").addEventListener("input", (e) => {
+$("#chat-input")?.addEventListener("input", (e) => {
   e.target.style.height = "auto";
   e.target.style.height = Math.min(e.target.scrollHeight, 160) + "px";
 });
-// Clear empties the TEXT BOX only (it does NOT wipe the conversation).
-$("#chat-clear").addEventListener("click", () => {
-  const input = $("#chat-input");
-  input.value = "";
-  input.style.height = "auto";
-  input.focus();
+
+// Chat-about-this delegate
+document.addEventListener("click", (e) => {
+  if (e.target.closest(".chat-about-btn")) {
+    const btn = e.target.closest(".chat-about-btn");
+    const title = btn.dataset.title;
+    const prompt = `Tell me more about ${title} and exactly why you think I'd like it based on my taste.`;
+    
+    // switch to Chat tab
+    $$(".tab").forEach((t) => t.classList.remove("active"));
+    $$(".panel").forEach((p) => p.classList.remove("active"));
+    $('.tab[data-tab="chat"]').classList.add("active");
+    $("#chat").classList.add("active");
+    
+    // Start fresh chat
+    currentSessionId = null;
+    chatHistory = [];
+    renderChat();
+    
+    sendChat(prompt);
+  }
 });
 
 // ----------------------------------------------------------------- mic diagnostics
@@ -1024,6 +1183,469 @@ $("#enrich-btn").addEventListener("click", async () => {
   }
 });
 
+let enrichBooksTotal = 0;
+
+async function loadEnrichBooksStatus() {
+  try {
+    const s = await api("/api/enrich-books/status");
+    enrichBooksTotal = enrichBooksTotal || s.remaining;
+    const status = $("#enrich-books-status");
+    $("#enrich-books-btn").disabled = s.remaining === 0;
+    status.textContent = s.remaining === 0
+      ? "All books enriched. ✓"
+      : `${s.remaining} books need covers.`;
+    const done = enrichBooksTotal - s.remaining;
+    $("#enrich-books-bar").style.width = enrichBooksTotal ? (100 * done / enrichBooksTotal) + "%" : "0%";
+  } catch (e) {
+    $("#enrich-books-status").textContent = e.message;
+  }
+}
+
+$("#enrich-books-btn").addEventListener("click", async () => {
+  const btn = $("#enrich-books-btn");
+  const msg = $("#enrich-books-msg");
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Fetching…';
+  let totalEnriched = 0, totalNoMatch = 0;
+  try {
+    const s0 = await api("/api/enrich-books/status");
+    enrichBooksTotal = s0.remaining;
+  } catch { /* ignore */ }
+  try {
+    while (true) {
+      const r = await api("/api/enrich-books", { method: "POST", body: JSON.stringify({ limit: 40 }) });
+      totalEnriched += r.enriched;
+      totalNoMatch += r.no_match;
+      const done = enrichBooksTotal - r.remaining;
+      $("#enrich-books-bar").style.width = enrichBooksTotal ? (100 * done / enrichBooksTotal) + "%" : "100%";
+      $("#enrich-books-status").textContent = `${r.remaining} remaining…`;
+      msg.className = "msg";
+      msg.textContent = `Found ${totalEnriched} covers, ${totalNoMatch} without a match…`;
+      if (r.remaining === 0 || r.processed === 0) break;
+    }
+    msg.className = "msg ok";
+    msg.textContent = `Done. Found ${totalEnriched} covers (${totalNoMatch} books had no match).`;
+    loadMedia();
+  } catch (e) {
+    msg.className = "msg error";
+    msg.textContent = e.message;
+  } finally {
+    btn.innerHTML = "Fetch missing covers";
+    loadEnrichBooksStatus();
+  }
+});
+
+let enrichGamesTotal = 0;
+
+async function loadEnrichGamesStatus() {
+  try {
+    const s = await api("/api/enrich-games/status");
+    enrichGamesTotal = enrichGamesTotal || s.remaining;
+    const status = $("#enrich-games-status");
+    $("#enrich-games-btn").disabled = s.remaining === 0;
+    status.textContent = s.remaining === 0
+      ? "All games enriched. ✓"
+      : `${s.remaining} games need metadata.`;
+    const done = enrichGamesTotal - s.remaining;
+    $("#enrich-games-bar").style.width = enrichGamesTotal ? (100 * done / enrichGamesTotal) + "%" : "0%";
+  } catch (e) {
+    $("#enrich-games-status").textContent = e.message;
+  }
+}
+
+$("#enrich-games-btn")?.addEventListener("click", async () => {
+  const btn = $("#enrich-games-btn");
+  const msg = $("#enrich-games-msg");
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Fetching…';
+  let totalEnriched = 0, totalNoMatch = 0;
+  try {
+    const s0 = await api("/api/enrich-games/status");
+    enrichGamesTotal = s0.remaining;
+  } catch { /* ignore */ }
+  try {
+    while (true) {
+      const r = await api("/api/enrich-games", { method: "POST", body: JSON.stringify({ limit: 40 }) });
+      totalEnriched += r.enriched;
+      totalNoMatch += r.no_match;
+      const done = enrichGamesTotal - r.remaining;
+      $("#enrich-games-bar").style.width = enrichGamesTotal ? (100 * done / enrichGamesTotal) + "%" : "100%";
+      $("#enrich-games-status").textContent = `${r.remaining} remaining…`;
+      msg.className = "msg";
+      msg.textContent = `Found ${totalEnriched} matches, ${totalNoMatch} without a match…`;
+      if (r.remaining === 0 || r.processed === 0) break;
+    }
+    msg.className = "msg ok";
+    msg.textContent = `Done. Found ${totalEnriched} matches (${totalNoMatch} games had no match).`;
+    loadMedia();
+  } catch (e) {
+    msg.className = "msg error";
+    msg.textContent = e.message;
+  } finally {
+    btn.innerHTML = "Fetch Steam metadata";
+    loadEnrichGamesStatus();
+  }
+});
+
 // ----------------------------------------------------------------- init
 checkHealth();
 loadMedia();
+loadEnrichStatus();
+loadEnrichBooksStatus();
+loadEnrichGamesStatus();
+loadStatsProgress();
+// ----------------------------------------------------------------- BOOKS
+$("#book-search-btn")?.addEventListener("click", async () => {
+  const btn = $("#book-search-btn");
+  const input = $("#book-search-input");
+  const resultsDiv = $("#book-search-results");
+  const msg = $("#book-search-msg");
+  
+  const q = input.value.trim();
+  if (!q) return;
+  
+  btn.disabled = true;
+  msg.className = "msg";
+  msg.textContent = "Searching...";
+  resultsDiv.innerHTML = "";
+  
+  try {
+    const data = await api("/api/books/search?q=" + encodeURIComponent(q));
+    msg.textContent = "";
+    
+    if (!data.items || !data.items.length) {
+       msg.textContent = "No results found.";
+       return;
+    }
+    
+    resultsDiv.innerHTML = data.items.map((b, i) => `
+      <div class="book-result" style="display:flex; gap:12px; align-items:center; background:var(--bg2); padding:8px; border-radius:var(--radius); border:1px solid var(--line);">
+        ${b.thumb ? `<img src="${esc(b.thumb)}" style="width:40px; height:60px; object-fit:cover; border-radius:4px;" />` : `<div style="width:40px; height:60px; background:var(--line); border-radius:4px;"></div>`}
+        <div style="flex:1">
+          <div style="font-weight:600; font-size:14px;">${esc(b.title)}</div>
+          <div class="muted" style="font-size:12px;">${esc(b.author || "Unknown Author")} ${b.year ? `(${b.year})` : ""}</div>
+        </div>
+        <select class="book-rate-select" data-index="${i}" style="width:120px; font-size:13px; padding:4px;">
+           <option value="">-- rate --</option>
+           <option value="loved">👍👍 Loved it</option>
+           <option value="liked">👍 Liked it</option>
+           <option value="disliked">👎 Nope</option>
+        </select>
+        <button class="btn primary book-add-btn" data-index="${i}" style="padding:4px 8px; font-size:13px;">Save</button>
+      </div>
+    `).join("");
+    
+    $$(".book-add-btn", resultsDiv).forEach(addBtn => {
+       addBtn.addEventListener("click", async () => {
+          const idx = addBtn.dataset.index;
+          const b = data.items[idx];
+          const select = $$(".book-rate-select", resultsDiv).find(s => s.dataset.index === idx);
+          const verdict = select.value || null;
+          
+          addBtn.disabled = true;
+          addBtn.textContent = "Saving...";
+          try {
+             const r = await api("/api/media/manual", {
+                 method: "POST",
+                 body: JSON.stringify({
+                     title: b.title,
+                     type: "book",
+                     year: b.year,
+                     author: b.author,
+                     verdict: verdict,
+                 })
+             });
+             addBtn.textContent = "Saved ✓";
+             addBtn.className = "btn"; // Make it look less active
+          } catch(e) {
+             addBtn.disabled = false;
+             addBtn.textContent = "Save";
+             msg.className = "msg error";
+             msg.textContent = e.message;
+          }
+       });
+    });
+    
+  } catch(e) {
+    msg.className = "msg error";
+    msg.textContent = e.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$("#games-path-submit")?.addEventListener("click", async () => {
+  const btn = $("#games-path-submit");
+  const input = $("#games-path-input");
+  const msg = $("#games-path-msg");
+  const resultsDiv = $("#games-path-results");
+  const path = input.value.trim();
+  if (!path) return;
+  
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Scanning...';
+  msg.className = "msg";
+  msg.textContent = "Scanning folder...";
+  resultsDiv.innerHTML = "";
+  
+  try {
+    const res = await fetch("/api/import/games-path", {
+       method: "POST",
+       headers: { "Content-Type": "application/json" },
+       body: JSON.stringify({ path })
+    });
+    
+    if (!res.ok) {
+        let errStr = res.statusText;
+        try {
+            const data = await res.json();
+            errStr = data.detail || errStr;
+        } catch(e) {}
+        throw new Error(`Server error: ${errStr}`);
+    }
+    
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n\n");
+        buffer = lines.pop(); // keep incomplete chunk
+        
+        for (const line of lines) {
+            if (line.startsWith("data: ")) {
+                const data = JSON.parse(line.slice(6));
+                
+                if (data.type === "progress") {
+                    msg.textContent = `Scanning: ${data.file}`;
+                } else if (data.type === "error") {
+                    throw new Error(data.message);
+                    } else if (data.type === "done") {
+                    msg.className = "msg ok";
+                    
+                    if (data.added > 0) {
+                        msg.textContent = `Found ${data.unique} games. Added ${data.added} new games. Fetching posters...`;
+                        
+                        // Run enrichment in the background before showing cards
+                        while (true) {
+                            try {
+                                const r = await api("/api/enrich-games", { method: "POST", body: JSON.stringify({ limit: 40 }) });
+                                if (r.remaining === 0 || r.processed === 0) break;
+                            } catch (e) {
+                                break; // ignore errors and just show what we have
+                            }
+                        }
+                        
+                        // Update status button silently
+                        await loadEnrichGamesStatus();
+                        
+                        // Grab the updated media objects so we have posters
+                        try {
+                            const mediaRes = await api("/api/media?source=local_scan&sort=added&type=game");
+                            const itemMap = new Map(mediaRes.items.map(m => [m.ratingKey, m]));
+                            data.items = data.items.map(m => itemMap.get(m.ratingKey) || m);
+                        } catch (e) {
+                            console.error("Failed to refresh enriched media", e);
+                        }
+                    }
+                    
+                    msg.textContent = `Found ${data.unique} games. Added ${data.added} new games to your library.`;
+                    
+                    if (data.items && data.items.length > 0) {
+                        resultsDiv.innerHTML = '<div class="grid" style="margin-top:16px;">' + data.items.map(m => {
+                            const src = m.thumb ? (m.thumb.startsWith("http") ? m.thumb : "/api/thumb/" + encodeURIComponent(m.ratingKey)) : null;
+                            const poster = src
+                              ? `<img class="poster" loading="lazy" src="${esc(src)}" alt="" data-title="${esc(m.title)}" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'poster placeholder',textContent:this.getAttribute('data-title')}))" />`
+                              : `<div class="poster placeholder">${esc(m.title)}</div>`;
+                            return `
+                            <div class="card scan-card" data-key="${esc(m.ratingKey)}">
+                              <span class="src-badge">Added</span>
+                              <button class="delete-btn" title="Delete from library" data-key="${esc(m.ratingKey)}" style="position: absolute; top: 6px; left: 6px; z-index: 10; background: rgba(0,0,0,0.65); border: 1px solid var(--border); color: #ff4444; border-radius: 4px; padding: 2px 6px; cursor: pointer;">❌</button>
+                              ${poster}
+                              <div class="card-body">
+                                <div class="card-title">${esc(m.title)}</div>
+                                <div class="card-meta">${m.year || ""}${m.author ? " · " + esc(m.author) : ""}</div>
+                                <div class="verdicts">
+                                  <button class="verdict-btn loved" data-v="loved" title="Love it (2)">👍👍</button>
+                                  <button class="verdict-btn liked" data-v="liked" title="Like it (1)">👍</button>
+                                  <button class="verdict-btn disliked" data-v="disliked" title="Nope (3)">👎</button>
+                                </div>
+                              </div>
+                            </div>`;
+                        }).join("") + '</div>';
+                        
+                        $$(".scan-card", resultsDiv).forEach(card => {
+                           const key = card.dataset.key;
+                           $$(".verdict-btn", card).forEach(vBtn => {
+                              vBtn.addEventListener("click", async () => {
+                                  const isActive = vBtn.classList.contains("active");
+                                  const verdict = isActive ? null : vBtn.dataset.v;
+                                  try {
+                                     await api("/api/rate", { method: "POST", body: JSON.stringify({ ratingKey: key, verdict: verdict }) });
+                                     $$(".verdict-btn", card).forEach(b => b.classList.toggle("active", b === vBtn && !isActive));
+                                     toast(verdict ? "Rated!" : "Rating cleared");
+                                     loadStatsProgress();
+                                  } catch(e) {
+                                     toast("Rate failed: " + e.message);
+                                  }
+                              });
+                           });
+                           
+                           const del = $(".delete-btn", card);
+                           if (del) {
+                               del.addEventListener("click", async (e) => {
+                                   e.stopPropagation();
+                                   try {
+                                       await api("/api/rate", { method: "POST", body: JSON.stringify({ ratingKey: key, verdict: "ignore" }) });
+                                       card.remove();
+                                   } catch(err) {
+                                       toast("Hide failed: " + err.message);
+                                   }
+                               });
+                           }
+                        });
+                    }
+                    input.value = "";
+                }
+            }
+        }
+    }
+  } catch (e) {
+    msg.className = "msg error";
+    msg.textContent = e.message;
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = 'Scan folder';
+  }
+});
+
+$("#books-path-submit")?.addEventListener("click", async () => {
+  const btn = $("#books-path-submit");
+  const input = $("#books-path-input");
+  const msg = $("#books-path-msg");
+  const resultsDiv = $("#books-path-results");
+  const path = input.value.trim();
+  if (!path) return;
+  
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Scanning...';
+  msg.className = "msg";
+  msg.textContent = "Scanning folder...";
+  resultsDiv.innerHTML = "";
+  
+  try {
+    const res = await fetch("/api/import/books-path", {
+       method: "POST",
+       headers: { "Content-Type": "application/json" },
+       body: JSON.stringify({ path })
+    });
+    
+    if (!res.ok) {
+        let errStr = res.statusText;
+        try {
+            const data = await res.json();
+            errStr = data.detail || errStr;
+        } catch(e) {}
+        throw new Error(`Server error: ${errStr}`);
+    }
+    
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n\n");
+        buffer = lines.pop(); // keep incomplete chunk
+        
+        for (const line of lines) {
+            if (line.startsWith("data: ")) {
+                const data = JSON.parse(line.slice(6));
+                
+                if (data.type === "progress") {
+                    msg.textContent = `Scanning: ${data.file}`;
+                } else if (data.type === "error") {
+                    throw new Error(data.message);
+                } else if (data.type === "done") {
+                    msg.className = "msg ok";
+                    msg.textContent = `Found ${data.unique} books. Added ${data.added} new books to your library.`;
+                    
+                    if (data.items && data.items.length > 0) {
+                        resultsDiv.innerHTML = '<div class="grid" style="margin-top:16px;">' + data.items.map(m => {
+                            const src = m.thumb ? (m.thumb.startsWith("http") ? m.thumb : "/api/thumb/" + encodeURIComponent(m.ratingKey)) : null;
+                            const poster = src
+                              ? `<img class="poster" loading="lazy" src="${esc(src)}" alt="" data-title="${esc(m.title)}" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'poster placeholder',textContent:this.getAttribute('data-title')}))" />`
+                              : `<div class="poster placeholder">${esc(m.title)}</div>`;
+                            return `
+                            <div class="card scan-card" data-key="${esc(m.ratingKey)}">
+                              <span class="src-badge">Added</span>
+                              <button class="delete-btn" title="Delete from library" data-key="${esc(m.ratingKey)}" style="position: absolute; top: 6px; left: 6px; z-index: 10; background: rgba(0,0,0,0.65); border: 1px solid var(--border); color: #ff4444; border-radius: 4px; padding: 2px 6px; cursor: pointer;">❌</button>
+                              ${poster}
+                              <div class="card-body">
+                                <div class="card-title">${esc(m.title)}</div>
+                                <div class="card-meta">${m.year || ""}${m.author ? " · " + esc(m.author) : ""}</div>
+                                <div class="verdicts">
+                                  <button class="verdict-btn loved" data-v="loved" title="Love it (2)">👍👍</button>
+                                  <button class="verdict-btn liked" data-v="liked" title="Like it (1)">👍</button>
+                                  <button class="verdict-btn disliked" data-v="disliked" title="Nope (3)">👎</button>
+                                </div>
+                              </div>
+                            </div>`;
+                        }).join("") + '</div>';
+                        
+                        $$(".scan-card", resultsDiv).forEach(card => {
+                           const key = card.dataset.key;
+                           $$(".verdict-btn", card).forEach(vBtn => {
+                              vBtn.addEventListener("click", async () => {
+                                  const isActive = vBtn.classList.contains("active");
+                                  const verdict = isActive ? null : vBtn.dataset.v;
+                                  try {
+                                     await api("/api/rate", { method: "POST", body: JSON.stringify({ ratingKey: key, verdict: verdict }) });
+                                     $$(".verdict-btn", card).forEach(b => b.classList.toggle("active", b === vBtn && !isActive));
+                                     toast(verdict ? "Rated!" : "Rating cleared");
+                                     loadStatsProgress();
+                                  } catch(e) {
+                                     toast("Rate failed: " + e.message);
+                                  }
+                              });
+                           });
+                           
+                           const del = $(".delete-btn", card);
+                           if (del) {
+                               del.addEventListener("click", async (e) => {
+                                   e.stopPropagation();
+                                   try {
+                                       await api("/api/rate", { method: "POST", body: JSON.stringify({ ratingKey: key, verdict: "ignore" }) });
+                                       card.remove();
+                                   } catch(err) {
+                                       toast("Hide failed: " + err.message);
+                                   }
+                               });
+                           }
+                        });
+                    }
+                    input.value = "";
+                    if (data.added > 0) {
+                        await loadEnrichBooksStatus();
+                        const enrichBtn = $("#enrich-books-btn");
+                        if (enrichBtn && !enrichBtn.disabled) {
+                            setTimeout(() => enrichBtn.click(), 500);
+                        }
+                    }
+                }
+            }
+        }
+    }
+  } catch (e) {
+    msg.className = "msg error";
+    msg.textContent = e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Scan folder";
+  }
+});

@@ -18,6 +18,7 @@
       <button class="tab" data-tab="discover">Discover</button>
       <button class="tab" data-tab="chat">Chat</button>
       <button class="tab" data-tab="watchlist">Watchlist</button>
+      <button class="tab" id="nav-new-btn">New Additions</button>
       <button class="tab" data-tab="add">Add / Import</button>
       <button class="tab" data-tab="stats">Stats</button>
     </nav>
@@ -41,12 +42,15 @@
           <button class="chip" data-status="loved">👍👍 Loved</button>
           <button class="chip" data-status="liked">👍 Liked</button>
           <button class="chip" data-status="disliked">👎 Nope</button>
+          <button class="chip" data-status="ignore">❌ Ignored</button>
           <button class="chip" data-status="all">All</button>
         </div>
         <div class="filters" id="type-filters">
-          <button class="chip active" data-type="">Both</button>
+          <button class="chip active" data-type="">All Types</button>
           <button class="chip" data-type="movie">Movies</button>
           <button class="chip" data-type="show">TV</button>
+          <button class="chip" data-type="book">Books</button>
+          <button class="chip" data-type="game">Games</button>
         </div>
         <div class="filters" id="source-filters">
           <button class="chip active" data-source="">All sources</button>
@@ -58,6 +62,7 @@
           <option value="title">Title A–Z</option>
           <option value="year_desc">Year — newest first</option>
           <option value="year_asc">Year — oldest first</option>
+          <option value="author">Author A–Z</option>
           <option value="added">Recently added</option>
           <option value="rated">Recently rated</option>
           <option value="random">Random shuffle</option>
@@ -83,9 +88,12 @@
         </label>
         <label>Type
           <select id="rec-type">
+            <option value="all">Everything</option>
             <option value="both">Movies + TV</option>
             <option value="movie">Movies</option>
-            <option value="show">TV shows</option>
+            <option value="show">TV Shows</option>
+            <option value="book">Books</option>
+            <option value="game">Games</option>
           </select>
         </label>
       </div>
@@ -128,29 +136,31 @@
 
     <!-- ============================ CHAT =========================== -->
     <section id="chat" class="panel">
-      <div class="chat-wrap">
-        <div id="chat-log" class="chat-log">
-          <div class="chat-hint muted">Talk to Praxis — it knows your ratings. Try
-            "what's a short, funny thing for tonight?" or "I'm in the mood for a
-            paranoid 70s thriller."</div>
+      <div class="chat-layout">
+        <div class="chat-sidebar">
+          <button id="new-chat-btn" class="btn">New Chat</button>
+          <ul id="chat-history-list"></ul>
         </div>
-        <div class="chat-input-row">
-          <button id="mic-btn" class="btn mic" title="Voice input">🎤</button>
-          <textarea id="chat-input" class="chat-input" rows="1"
-            placeholder="Ask for something to watch…"></textarea>
-          <button id="chat-send" class="btn primary">Send</button>
-          <button id="chat-clear" class="btn" title="Clear conversation">Clear</button>
-        </div>
-        <details id="mic-diag" class="mic-diag">
-          <summary>🔬 Microphone diagnostics</summary>
-          <div class="mic-diag-actions">
-            <button id="mic-test-btn" class="btn">Run mic test</button>
-            <button id="mic-copy-btn" class="btn">Copy log</button>
-            <button id="mic-clearlog-btn" class="btn">Clear log</button>
+        <div class="chat-main">
+          <div id="chat-messages">
+            <div class="chat-hint muted">Talk to Praxis — it knows your ratings. Try "what's a short, funny thing for tonight?" or "I'm in the mood for a paranoid 70s thriller."</div>
           </div>
-          <pre id="mic-log" class="mic-log">No mic events yet. Click "Run mic test", or click the 🎤 and watch here.</pre>
-        </details>
+          <div class="chat-input-area">
+            <button id="mic-btn" class="btn">🎤</button>
+            <input id="chat-input" placeholder="Ask for something to watch…" />
+            <button id="chat-send" class="btn">Send</button>
+          </div>
+        </div>
       </div>
+      <details id="mic-diag" class="mic-diag">
+        <summary>🔬 Microphone diagnostics</summary>
+        <div class="mic-diag-actions">
+          <button id="mic-test-btn" class="btn">Run mic test</button>
+          <button id="mic-copy-btn" class="btn">Copy log</button>
+          <button id="mic-clearlog-btn" class="btn">Clear log</button>
+        </div>
+        <pre id="mic-log" class="mic-log">No mic events yet. Click "Run mic test", or click the 🎤 and watch here.</pre>
+      </details>
     </section>
 
     <!-- ========================= WATCHLIST ========================= -->
@@ -184,6 +194,8 @@
                 <select id="add-type">
                   <option value="show">TV show</option>
                   <option value="movie">Movie</option>
+                  <option value="book">Book</option>
+                  <option value="game">Game</option>
                 </select>
               </label>
               <label>Year (optional)<input id="add-year" type="number" min="1900" max="2099" placeholder="2022" /></label>
@@ -215,6 +227,63 @@
         </div>
 
         <div class="add-card">
+          <h3>Search & Add Book</h3>
+          <p class="muted">Search for a physical or past book to add to your library.</p>
+          <div class="add-form">
+            <div style="display:flex; gap:8px;">
+                <input id="book-search-input" type="text" placeholder="e.g. Stranger in a Strange Land" style="flex:1" />
+                <button id="book-search-btn" class="btn primary">Search</button>
+            </div>
+            <div id="book-search-results" style="margin-top:12px; display:flex; flex-direction:column; gap:8px;"></div>
+            <div id="book-search-msg" class="msg"></div>
+          </div>
+        </div>
+
+        <div class="add-card">
+          <h3>Scan folder for Books</h3>
+          <p class="muted">Scan a local folder for EPUB, MOBI, PDF, and AZW3 files.</p>
+          <div class="add-form">
+            <input id="books-path-input" type="text" placeholder="C:\Users\Lodebek\Books" />
+            <button id="books-path-submit" class="btn primary">Scan folder</button>
+            <div id="books-path-msg" class="msg"></div>
+            <div id="books-path-results" style="margin-top:12px; display:flex; flex-direction:column; gap:8px;"></div>
+          </div>
+        </div>
+        <div class="add-card">
+          <h3>Enrich metadata (Google Books)</h3>
+          <p class="muted">Books imported from local folders might be missing covers or genres. This searches <strong>Google Books</strong> to automatically find and download their covers.</p>
+          <div class="add-form">
+            <div id="enrich-books-status" class="muted"></div>
+            <div class="progress"><div id="enrich-books-bar" class="progress-fill"></div></div>
+            <button id="enrich-books-btn" class="btn primary">Fetch missing covers</button>
+            <div id="enrich-books-msg" class="msg"></div>
+          </div>
+        </div>
+
+        <div class="add-card">
+          <h3>Scan folder for PC Games</h3>
+          <p class="muted">Scan a local folder (e.g. C:\Games or a torrent folder) for PC video games.</p>
+          <div class="add-form">
+            <input id="games-path-input" type="text" placeholder="D:\Games" />
+            <button id="games-path-submit" class="btn primary">Scan folder</button>
+            <div id="games-path-msg" class="msg"></div>
+            <div id="games-path-results" style="margin-top:12px; display:flex; flex-direction:column; gap:8px;"></div>
+          </div>
+        </div>
+        
+        <div class="add-card">
+          <h3>Enrich metadata (Steam)</h3>
+          <p class="muted">Games imported from local folders might be missing covers or genres. This searches <strong>Steam</strong> to automatically find and download their posters and details.</p>
+          <div class="add-form">
+            <div id="enrich-games-status" class="muted"></div>
+            <div class="progress"><div id="enrich-games-bar" class="progress-fill"></div></div>
+            <button id="enrich-games-btn" class="btn primary">Fetch Steam metadata</button>
+            <div id="enrich-games-msg" class="msg"></div>
+          </div>
+        </div>
+
+
+        <div class="add-card">
           <h3>Enrich metadata (TMDB)</h3>
           <p class="muted">Imported titles start bare (no year/genre/poster). This
             looks each up on <strong>The Movie Database</strong> — the same source
@@ -233,6 +302,12 @@
 
     <!-- =========================== STATS =========================== -->
     <section id="stats" class="panel">
+      <div class="taste-analysis-section">
+        <button id="analyze-taste-btn">Analyze My Taste (AI Roast)</button>
+        <div id="taste-analysis-output"></div>
+      </div>
+      <div class="stats-overview" id="stats-overview"></div>
+      <div class="charts"></div>
       <div id="stats-content" class="stats-grid"></div>
     </section>
   </main>

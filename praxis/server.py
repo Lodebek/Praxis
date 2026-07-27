@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import time
 from typing import Any, Optional
+import requests
 
 from fastapi import FastAPI, HTTPException, Query, Response, UploadFile, File, Form
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import db, importers, plex, recommend, tmdb
+from . import db, importers, plex, recommend, tmdb, books, games
 from .config import WEB_DIR, load_config
 
 app = FastAPI(title="Praxis", version="0.1.0")
@@ -19,7 +20,7 @@ app = FastAPI(title="Praxis", version="0.1.0")
 # its own expected value and warns if the running server is stale (a common
 # confusion: the browser serves fresh static files while an old python process
 # still answers the API and returns 405 for new routes).
-SERVER_VERSION = "2026-06-06.2"
+SERVER_VERSION = "2026-06-07.1"
 
 # simple in-process poster cache: ratingKey -> (bytes, content_type)
 _thumb_cache: dict[str, tuple[bytes, str]] = {}
@@ -35,11 +36,11 @@ def _do_sync(c: dict[str, Any]) -> dict[str, Any]:
     result = plex.fetch_library(c, synced_at)
     conn = db.connect()
     try:
-        n = db.upsert_media(conn, result["rows"])
+        res = db.upsert_media(conn, result["rows"])
     finally:
         conn.close()
     _thumb_cache.clear()
-    return {"synced": n, "counts": result["counts"]}
+    return {"synced": res["total"], "new": res["new"], "counts": result["counts"]}
 
 
 @app.on_event("startup")
@@ -81,14 +82,15 @@ class ImportBody(BaseModel):
 
 class ManualMediaBody(BaseModel):
     title: str
-    type: str = "movie"  # movie | show
+    type: str = "movie"  # movie | show | book | game
     year: Optional[int] = None
+    author: Optional[str] = None
     verdict: Optional[str] = None  # loved | liked | disliked | None
     note: Optional[str] = None
 
 
-class ChatBody(BaseModel):
-    messages: list[dict[str, str]]
+class ChatMessageBody(BaseModel):
+    content: str
 
 
 # ---------------------------------------------------------------- system
@@ -152,6 +154,16 @@ def rate(body: RateBody) -> dict[str, Any]:
     return {"ok": True, "item": item}
 
 
+@app.delete("/api/media/{rating_key}")
+def delete_media(rating_key: str) -> dict[str, Any]:
+    conn = db.connect()
+    try:
+        db.delete_media(conn, rating_key)
+    finally:
+        conn.close()
+    return {"ok": True}
+
+
 @app.post("/api/media/manual")
 def add_manual(body: ManualMediaBody) -> dict[str, Any]:
     """Add a title you watched elsewhere (not in Plex), optionally pre-rated."""
@@ -160,7 +172,7 @@ def add_manual(body: ManualMediaBody) -> dict[str, Any]:
     conn = db.connect()
     try:
         key = db.add_external_media(
-            conn, body.title, body.type, source="manual", year=body.year
+            conn, body.title, body.type, source="manual", year=body.year, author=body.author
         )
         if key is None:
             raise HTTPException(status_code=409, detail="a title with that name already exists")
@@ -216,6 +228,100 @@ def import_netflix_path(body: PathBody) -> dict[str, Any]:
     return _import_netflix_text(_decode_csv(p.read_bytes()))
 
 
+@app.post("/api/import/books-path")
+def import_books_path(body: PathBody) -> StreamingResponse:
+    import json
+    def event_stream():
+        try:
+            results = []
+            for event in books.scan_directory_stream(body.path):
+                if event["type"] == "progress":
+                    yield f"data: {json.dumps(event)}\n\n"
+                elif event["type"] == "book":
+                    results.append(event["data"])
+                elif event["type"] == "error":
+                    yield f"data: {json.dumps(event)}\n\n"
+                    return
+            
+            conn = db.connect()
+            try:
+                res = db.bulk_add_external(conn, results, source="local_scan")
+                yield f"data: {json.dumps({'type': 'done', 'unique': len(results), 'added': res['added'], 'items': res['items']})}\n\n"
+            finally:
+                conn.close()
+        except Exception as exc:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+            
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.post("/api/import/games-path")
+def import_games_path(body: PathBody) -> StreamingResponse:
+    import json
+    def event_stream():
+        try:
+            results = []
+            for event in games.scan_games_dir(body.path):
+                if event["type"] == "progress":
+                    yield f"data: {json.dumps(event)}\n\n"
+                elif event["type"] == "game":
+                    results.append(event["data"])
+                elif event["type"] == "error":
+                    yield f"data: {json.dumps(event)}\n\n"
+                    return
+            
+            conn = db.connect()
+            try:
+                res = db.bulk_add_external(conn, results, source="local_scan")
+                yield f"data: {json.dumps({'type': 'done', 'unique': len(results), 'added': res['added'], 'items': res['items']})}\n\n"
+            finally:
+                conn.close()
+        except Exception as exc:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+            
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.get("/api/books/search")
+def search_books(q: str = Query(...)) -> dict[str, Any]:
+    if not q.strip():
+        return {"items": []}
+    try:
+        resp = requests.get(
+            "https://www.googleapis.com/books/v1/volumes",
+            params={"q": q, "maxResults": 10},
+            timeout=10
+        )
+        resp.raise_for_status()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Google Books API failed: {exc}") from exc
+    
+    data = resp.json()
+    items = []
+    for item in data.get("items", []):
+        vol = item.get("volumeInfo", {})
+        title = vol.get("title")
+        if not title:
+            continue
+        authors = vol.get("authors", [])
+        author = authors[0] if authors else None
+        date = vol.get("publishedDate", "")
+        year = int(date[:4]) if date[:4].isdigit() else None
+        
+        # Change http to https for images
+        thumb = vol.get("imageLinks", {}).get("thumbnail")
+        if thumb and thumb.startswith("http:"):
+            thumb = "https:" + thumb[5:]
+
+        items.append({
+            "title": title,
+            "author": author,
+            "year": year,
+            "thumb": thumb,
+        })
+    return {"items": items}
+
+
 @app.get("/api/enrich/status")
 def enrich_status() -> dict[str, Any]:
     conn = db.connect()
@@ -269,6 +375,162 @@ def enrich(body: EnrichBody) -> dict[str, Any]:
             "no_match": failed, "remaining": remaining}
 
 
+@app.get("/api/enrich-books/status")
+def enrich_books_status() -> dict[str, Any]:
+    conn = db.connect()
+    try:
+        remaining = db.books_needing_enrichment_count(conn)
+    finally:
+        conn.close()
+    return {"remaining": remaining}
+
+
+@app.get("/api/enrich-games/status")
+def enrich_games_status() -> dict[str, Any]:
+    conn = db.connect()
+    try:
+        remaining = db.games_needing_enrichment_count(conn)
+    finally:
+        conn.close()
+    return {"remaining": remaining}
+
+
+@app.post("/api/enrich-books")
+def enrich_books(body: EnrichBody) -> dict[str, Any]:
+    """Search Google Books for imported books with missing covers."""
+    conn = db.connect()
+    try:
+        batch = db.books_needing_enrichment(conn, max(1, min(body.limit, 100)))
+        enriched = failed = 0
+        for item in batch:
+            try:
+                q = f"{item['title']} {item.get('author') or ''}".strip()
+                resp = requests.get(
+                    "https://www.googleapis.com/books/v1/volumes",
+                    params={"q": q, "maxResults": 1},
+                    timeout=5
+                )
+                if resp.status_code == 200:
+                    items = resp.json().get("items", [])
+                    if items:
+                        vol = items[0].get("volumeInfo", {})
+                        thumb = vol.get("imageLinks", {}).get("thumbnail")
+                        if thumb and thumb.startswith("http:"):
+                            thumb = "https:" + thumb[5:]
+                        
+                        data = {}
+                        if thumb: data["thumb"] = thumb
+                        genres = vol.get("categories", [])
+                        if genres: data["genres"] = genres
+                        date = vol.get("publishedDate", "")
+                        if date[:4].isdigit(): data["year"] = int(date[:4])
+                        
+                        db.apply_enrichment(conn, item["ratingKey"], data if data else None)
+                        if data:
+                            enriched += 1
+                        else:
+                            failed += 1
+                    else:
+                        db.apply_enrichment(conn, item["ratingKey"], None)
+                        failed += 1
+                else:
+                    db.apply_enrichment(conn, item["ratingKey"], None)
+                    failed += 1
+            except Exception:
+                db.apply_enrichment(conn, item["ratingKey"], None)
+                failed += 1
+                
+        remaining = db.books_needing_enrichment_count(conn)
+    finally:
+        conn.close()
+    _thumb_cache.clear()
+    return {"processed": len(batch), "enriched": enriched,
+            "no_match": failed, "remaining": remaining}
+
+
+@app.post("/api/enrich-games")
+def enrich_games(body: EnrichBody) -> dict[str, Any]:
+    """Search Steam Store API for imported games with missing metadata."""
+    conn = db.connect()
+    try:
+        batch = db.games_needing_enrichment(conn, max(1, min(body.limit, 100)))
+        enriched = failed = 0
+        for item in batch:
+            try:
+                # Strip punctuation for fuzzy search (Steam API is bad at hyphens)
+                clean_term = __import__('re').sub(r'[^\w\s]', '', item["title"])
+                resp = requests.get(
+                    "https://store.steampowered.com/api/storesearch/",
+                    params={"term": clean_term, "l": "english", "cc": "US"},
+                    timeout=5
+                )
+                if resp.status_code == 200:
+                    items = resp.json().get("items", [])
+                    if items:
+                        # Grab the exact first match
+                        game = items[0]
+                        appid = game.get("id")
+                        thumb = game.get("tiny_image")
+                        if thumb:
+                            thumb = __import__('re').sub(r'capsule_.*?\.jpg', 'library_600x900.jpg', thumb)
+                        
+                        data = {}
+                        if thumb:
+                            data["thumb"] = thumb
+                            
+                        # If we have an appid, try to fetch more details (genres, year)
+                        if appid:
+                            try:
+                                det_resp = requests.get(
+                                    f"https://store.steampowered.com/api/appdetails?appids={appid}",
+                                    timeout=5
+                                )
+                                if det_resp.status_code == 200:
+                                    det_data = det_resp.json().get(str(appid), {})
+                                    if det_data.get("success"):
+                                        game_data = det_data.get("data", {})
+                                        
+                                        # Parse genres
+                                        genres = [g.get("description") for g in game_data.get("genres", [])]
+                                        if genres:
+                                            data["genres"] = genres
+                                        
+                                        # Parse year
+                                        date_str = game_data.get("release_date", {}).get("date", "")
+                                        year_match = __import__('re').search(r'\\b(19\\d{2}|20\\d{2})\\b', date_str)
+                                        if year_match:
+                                            data["year"] = int(year_match.group(1))
+                                            
+                                        # Parse developer as author
+                                        devs = game_data.get("developers", [])
+                                        if devs:
+                                            data["author"] = devs[0]
+                            except Exception:
+                                pass # ignore detail errors and just use storesearch thumb
+                                
+                        db.apply_enrichment(conn, item["ratingKey"], data if data else None)
+                        if data:
+                            enriched += 1
+                        else:
+                            failed += 1
+                    else:
+                        db.apply_enrichment(conn, item["ratingKey"], None)
+                        failed += 1
+                else:
+                    db.apply_enrichment(conn, item["ratingKey"], None)
+                    failed += 1
+            except Exception:
+                db.apply_enrichment(conn, item["ratingKey"], None)
+                failed += 1
+                
+        remaining = db.games_needing_enrichment_count(conn)
+    finally:
+        conn.close()
+    _thumb_cache.clear()
+    return {"processed": len(batch), "enriched": enriched,
+            "no_match": failed, "remaining": remaining}
+
+
 @app.get("/api/thumb/{rating_key}")
 def thumb(rating_key: str) -> Response:
     if rating_key in _thumb_cache:
@@ -283,8 +545,25 @@ def thumb(rating_key: str) -> Response:
     if not item or not item.get("thumb"):
         raise HTTPException(status_code=404, detail="no poster")
 
+    thumb_val = item["thumb"]
+    
+    if thumb_val.startswith("local:"):
+        from .config import DATA_DIR
+        path = DATA_DIR / "covers" / thumb_val[6:]
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="local poster not found")
+        return FileResponse(path)
+
+    if thumb_val.startswith("http"):
+        try:
+            r = requests.get(thumb_val, timeout=10)
+            _thumb_cache[rating_key] = (r.content, r.headers.get("content-type", "image/jpeg"))
+            return Response(content=r.content, media_type=r.headers.get("content-type", "image/jpeg"))
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"poster proxy failed: {exc}") from exc
+
     try:
-        data, ctype = plex.fetch_thumb(cfg(), item["thumb"])
+        data, ctype = plex.fetch_thumb(cfg(), thumb_val)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"poster fetch failed: {exc}") from exc
     _thumb_cache[rating_key] = (data, ctype)
@@ -341,11 +620,41 @@ def import_recommendations(body: ImportBody) -> dict[str, Any]:
     return {"added": len(ids), "recommendations": [stored[i] for i in ids if i in stored]}
 
 
-@app.post("/api/chat")
-def chat(body: ChatBody) -> dict[str, Any]:
+@app.get("/api/chat/sessions")
+def get_chat_sessions() -> dict[str, Any]:
     conn = db.connect()
     try:
-        return recommend.chat(conn, cfg(), body.messages)
+        items = db.get_chat_sessions(conn)
+    finally:
+        conn.close()
+    return {"sessions": items}
+
+
+@app.post("/api/chat/sessions")
+def create_chat_session() -> dict[str, Any]:
+    conn = db.connect()
+    try:
+        sid = db.create_chat_session(conn)
+    finally:
+        conn.close()
+    return {"session_id": sid}
+
+
+@app.get("/api/chat/sessions/{session_id}")
+def get_chat_session(session_id: str) -> dict[str, Any]:
+    conn = db.connect()
+    try:
+        msgs = db.get_chat_messages(conn, session_id)
+    finally:
+        conn.close()
+    return {"messages": msgs}
+
+
+@app.post("/api/chat/sessions/{session_id}/message")
+def send_chat_message(session_id: str, body: ChatMessageBody) -> dict[str, Any]:
+    conn = db.connect()
+    try:
+        return recommend.chat(conn, cfg(), session_id, body.content)
     except recommend.RecommendError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
@@ -405,6 +714,17 @@ def get_stats() -> dict[str, Any]:
     conn = db.connect()
     try:
         return db.stats(conn)
+    finally:
+        conn.close()
+
+
+@app.post("/api/stats/analyze")
+def analyze_taste() -> dict[str, Any]:
+    conn = db.connect()
+    try:
+        return {"analysis": recommend.analyze_taste(conn, cfg())}
+    except recommend.RecommendError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
         conn.close()
 

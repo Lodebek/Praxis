@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS media (
     type            TEXT NOT NULL,             -- 'movie' | 'show'
     title           TEXT NOT NULL,
     year            INTEGER,
+    author          TEXT,
     genres          TEXT,                      -- json array
     summary         TEXT,
     studio          TEXT,
@@ -61,7 +62,8 @@ CREATE TABLE IF NOT EXISTS recommendations (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     title          TEXT NOT NULL,
     year           INTEGER,
-    type           TEXT,                        -- 'movie' | 'show'
+    type           TEXT,                        -- 'movie' | 'show' | 'book' | 'game'
+    author         TEXT,
     source         TEXT,                        -- 'openrouter:<model>' | 'claude-export'
     reason         TEXT,
     where_to_watch TEXT,
@@ -74,8 +76,25 @@ CREATE TABLE IF NOT EXISTS recommendations (
     updated_at     INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS chat_sessions (
+    id             TEXT PRIMARY KEY,
+    title          TEXT NOT NULL,
+    created_at     INTEGER NOT NULL,
+    updated_at     INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id     TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+    role           TEXT NOT NULL,
+    content        TEXT NOT NULL,
+    recs_json      TEXT,                        -- json array
+    created_at     INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_media_type   ON media(type);
 CREATE INDEX IF NOT EXISTS idx_recs_status  ON recommendations(status);
+CREATE INDEX IF NOT EXISTS idx_chat_msgs    ON chat_messages(session_id);
 """
 
 
@@ -99,8 +118,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # plex rows arrive fully formed; external rows start un-enriched
         conn.execute("ALTER TABLE media ADD COLUMN enriched INTEGER NOT NULL DEFAULT 0")
         conn.execute("UPDATE media SET enriched = 1 WHERE source = 'plex'")
+    if "author" not in cols:
+        conn.execute("ALTER TABLE media ADD COLUMN author TEXT")
 
     rec_cols = {r["name"] for r in conn.execute("PRAGMA table_info(recommendations)").fetchall()}
+    if "author" not in rec_cols:
+        conn.execute("ALTER TABLE recommendations ADD COLUMN author TEXT")
     if "genres" not in rec_cols:
         conn.execute("ALTER TABLE recommendations ADD COLUMN genres TEXT")
     if "thumb" not in rec_cols:
@@ -111,33 +134,51 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE recommendations ADD COLUMN tmdb_id INTEGER")
     if "tmdb_type" not in rec_cols:
         conn.execute("ALTER TABLE recommendations ADD COLUMN tmdb_type TEXT")
+
+    # chat tables were added later
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS chat_sessions ("
+        "id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS chat_messages ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE, "
+        "role TEXT NOT NULL, content TEXT NOT NULL, recs_json TEXT, created_at INTEGER NOT NULL)"
+    )
     conn.commit()
 
 
 # ---------------------------------------------------------------- media
 
 _MEDIA_COLS = [
-    "ratingKey", "source", "enriched", "type", "title", "year", "genres", "summary", "studio",
+    "ratingKey", "source", "enriched", "type", "title", "year", "author", "genres", "summary", "studio",
     "content_rating", "critic_rating", "audience_rating", "duration_ms",
     "directors", "writers", "cast", "country", "tagline", "thumb",
     "added_at", "updated_at", "last_synced",
 ]
 
 
-def upsert_media(conn: sqlite3.Connection, rows: Iterable[dict[str, Any]]) -> int:
-    """Insert or update media rows keyed by ``ratingKey``. Ratings are untouched."""
+def upsert_media(conn: sqlite3.Connection, rows: Iterable[dict[str, Any]]) -> dict[str, int]:
+    """Insert or update media rows keyed by ``ratingKey``. Ratings are untouched.
+
+    Returns {'total', 'new'} so the UI can report how many freshly-added titles a
+    sync pulled in.
+    """
+    existing = {r["ratingKey"] for r in conn.execute("SELECT ratingKey FROM media").fetchall()}
     placeholders = ", ".join("?" for _ in _MEDIA_COLS)
     updates = ", ".join(f"{c}=excluded.{c}" for c in _MEDIA_COLS if c != "ratingKey")
     sql = (
         f"INSERT INTO media ({', '.join(_MEDIA_COLS)}) VALUES ({placeholders}) "
         f"ON CONFLICT(ratingKey) DO UPDATE SET {updates}"
     )
-    count = 0
+    total = new = 0
     for row in rows:
+        if row.get("ratingKey") not in existing:
+            new += 1
         conn.execute(sql, [row.get(c) for c in _MEDIA_COLS])
-        count += 1
+        total += 1
     conn.commit()
-    return count
+    return {"total": total, "new": new}
 
 
 def _media_to_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -163,7 +204,7 @@ def list_media(
     where: list[str] = []
     params: list[Any] = []
 
-    if media_type in ("movie", "show"):
+    if media_type in ("movie", "show", "book", "game"):
         where.append("m.type = ?")
         params.append(media_type)
 
@@ -178,7 +219,7 @@ def list_media(
         params.append(f"%{q}%")
     elif status == "unrated":
         where.append("r.verdict IS NULL")
-    elif status in ("loved", "liked", "disliked"):
+    elif status in ("loved", "liked", "disliked", "ignore"):
         where.append("r.verdict = ?")
         params.append(status)
     # 'all' -> no verdict filter
@@ -190,6 +231,7 @@ def list_media(
         "title": "m.title COLLATE NOCASE ASC",
         "year_desc": "m.year IS NULL, m.year DESC, m.title COLLATE NOCASE ASC",
         "year_asc": "m.year IS NULL, m.year ASC, m.title COLLATE NOCASE ASC",
+        "author": "m.author IS NULL, m.author COLLATE NOCASE ASC, m.title COLLATE NOCASE ASC",
         "added": "m.added_at DESC",
         "rated": "r.rated_at DESC NULLS LAST, m.title COLLATE NOCASE ASC",
         "random": "RANDOM()",
@@ -206,6 +248,13 @@ def list_media(
         params,
     ).fetchall()
     return [_media_to_dict(row) for row in rows]
+
+
+def delete_media(conn: sqlite3.Connection, rating_key: str) -> None:
+    """Delete a media item completely from the database."""
+    conn.execute("DELETE FROM ratings WHERE ratingKey = ?", (rating_key,))
+    conn.execute("DELETE FROM media WHERE ratingKey = ?", (rating_key,))
+    conn.commit()
 
 
 def get_media(conn: sqlite3.Connection, rating_key: str) -> dict[str, Any] | None:
@@ -230,6 +279,7 @@ def add_external_media(
     media_type: str,
     source: str,
     year: int | None = None,
+    author: str | None = None,
     genres: list[str] | None = None,
     thumb: str | None = None,
     enriched: bool = False,
@@ -239,7 +289,7 @@ def add_external_media(
     Returns the generated ratingKey, or None if a same-title row already exists
     (so we never duplicate a Plex/owned title).
     """
-    if media_type not in ("movie", "show"):
+    if media_type not in ("movie", "show", "book", "game"):
         media_type = "movie"
     if norm_title(title) in _existing_norms(conn):
         return None
@@ -253,6 +303,7 @@ def add_external_media(
         "type": media_type,
         "title": title.strip(),
         "year": year,
+        "author": author,
         "genres": json.dumps(genres or []),
         "directors": json.dumps([]),
         "writers": json.dumps([]),
@@ -278,10 +329,11 @@ def bulk_add_external(
     """Add many external titles, skipping any whose title already exists.
 
     Each item: {title, type, year?, genres?, verdict?}. If ``verdict`` is set,
-    a rating row is created too. Returns {'added', 'skipped', 'rated'}.
+    a rating row is created too. Returns {'added', 'skipped', 'rated', 'items'}.
     """
     existing = _existing_norms(conn)
     added = skipped = rated = 0
+    added_items = []
     now = int(time.time())
     placeholders = ", ".join("?" for _ in _MEDIA_COLS)
     for item in items:
@@ -294,12 +346,14 @@ def bulk_add_external(
             skipped += 1
             continue
         existing.add(n)
-        mtype = item.get("type") if item.get("type") in ("movie", "show") else "movie"
+        mtype = item.get("type") if item.get("type") in ("movie", "show", "book", "game") else "movie"
         key = f"{source}:{uuid.uuid4().hex[:12]}"
         row = {c: None for c in _MEDIA_COLS}
         row.update({
             "ratingKey": key, "source": source, "enriched": 0, "type": mtype, "title": title,
             "year": item.get("year"),
+            "author": item.get("author"),
+            "thumb": item.get("thumb"),
             "genres": json.dumps(item.get("genres") or []),
             "directors": json.dumps([]), "writers": json.dumps([]),
             "cast": json.dumps([]), "country": json.dumps([]),
@@ -309,6 +363,8 @@ def bulk_add_external(
             f"INSERT INTO media ({', '.join(_MEDIA_COLS)}) VALUES ({placeholders})",
             [row[c] for c in _MEDIA_COLS],
         )
+        # Mock a sqlite3.Row like dict for _media_to_dict
+        added_items.append(_media_to_dict(row))
         added += 1
         verdict = item.get("verdict")
         if verdict in ("loved", "liked", "disliked"):
@@ -318,7 +374,7 @@ def bulk_add_external(
             )
             rated += 1
     conn.commit()
-    return {"added": added, "skipped": skipped, "rated": rated}
+    return {"added": added, "skipped": skipped, "rated": rated, "items": added_items}
 
 
 def needs_enrichment_count(conn: sqlite3.Connection) -> int:
@@ -335,6 +391,39 @@ def media_needing_enrichment(
         (limit,),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def books_needing_enrichment_count(conn: sqlite3.Connection) -> int:
+    return conn.execute(
+        "SELECT COUNT(*) FROM media WHERE type = 'book' AND thumb IS NULL AND enriched = 0"
+    ).fetchone()[0]
+
+
+def books_needing_enrichment(
+    conn: sqlite3.Connection, limit: int
+) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT ratingKey, title, author FROM media WHERE type = 'book' AND thumb IS NULL AND enriched = 0 LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def games_needing_enrichment_count(conn: sqlite3.Connection) -> int:
+    return conn.execute(
+        "SELECT COUNT(*) FROM media WHERE type = 'game' AND thumb IS NULL AND enriched = 0"
+    ).fetchone()[0]
+
+
+def games_needing_enrichment(
+    conn: sqlite3.Connection, limit: int
+) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT ratingKey, title FROM media WHERE type = 'game' AND thumb IS NULL AND enriched = 0 LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
 
 
 def apply_enrichment(
@@ -388,7 +477,7 @@ def set_rating(
     if verdict is None:
         conn.execute("DELETE FROM ratings WHERE ratingKey = ?", (rating_key,))
     else:
-        if verdict not in ("loved", "liked", "disliked"):
+        if verdict not in ("loved", "liked", "disliked", "ignore"):
             raise ValueError(f"invalid verdict: {verdict!r}")
         conn.execute(
             """
@@ -434,14 +523,15 @@ def add_recommendations(
         cur = conn.execute(
             """
             INSERT INTO recommendations
-                (title, year, type, source, reason, where_to_watch, genres, thumb,
+                (title, year, type, author, source, reason, where_to_watch, genres, thumb,
                  imdb_id, tmdb_id, tmdb_type, status, in_library, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?)
             """,
             (
                 rec.get("title"),
                 rec.get("year"),
                 rec.get("type"),
+                rec.get("author"),
                 source,
                 rec.get("reason"),
                 rec.get("where_to_watch"),
@@ -510,6 +600,7 @@ def rate_recommendation(
         rec.get("type") or "movie",
         source="manual",
         year=rec.get("year"),
+        author=rec.get("author"),
         genres=rec.get("genres") or [],
         thumb=rec.get("thumb"),
         enriched=True,
@@ -596,3 +687,61 @@ def stats(conn: sqlite3.Connection) -> dict[str, Any]:
         "pct_rated": round(100 * rated / total, 1) if total else 0,
         "recommendations": recs,
     }
+
+
+# ---------------------------------------------------------------- chat
+
+
+def create_chat_session(conn: sqlite3.Connection, title: str = "New Chat") -> str:
+    session_id = uuid.uuid4().hex
+    now = int(time.time())
+    conn.execute(
+        "INSERT INTO chat_sessions (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+        (session_id, title, now, now)
+    )
+    conn.commit()
+    return session_id
+
+
+def get_chat_sessions(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = conn.execute("SELECT * FROM chat_sessions ORDER BY updated_at DESC").fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_chat_messages(conn: sqlite3.Connection, session_id: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT * FROM chat_messages WHERE session_id = ? ORDER BY created_at ASC",
+        (session_id,)
+    ).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["recs"] = json.loads(d["recs_json"]) if d.get("recs_json") else []
+        except (TypeError, json.JSONDecodeError):
+            d["recs"] = []
+        del d["recs_json"]
+        out.append(d)
+    return out
+
+
+def add_chat_message(
+    conn: sqlite3.Connection, session_id: str, role: str, content: str,
+    recs: list[dict[str, Any]] | None = None
+) -> None:
+    now = int(time.time())
+    recs_str = json.dumps(recs) if recs else None
+    conn.execute(
+        "INSERT INTO chat_messages (session_id, role, content, recs_json, created_at) VALUES (?, ?, ?, ?, ?)",
+        (session_id, role, content, recs_str, now)
+    )
+    
+    # Auto-title the session based on the first user message
+    if role == "user":
+        cnt = conn.execute("SELECT COUNT(*) FROM chat_messages WHERE session_id = ? AND role = 'user'", (session_id,)).fetchone()[0]
+        if cnt == 1:
+            title = (content[:30] + "…") if len(content) > 30 else content
+            conn.execute("UPDATE chat_sessions SET title = ? WHERE id = ?", (title, session_id))
+            
+    conn.execute("UPDATE chat_sessions SET updated_at = ? WHERE id = ?", (now, session_id))
+    conn.commit()

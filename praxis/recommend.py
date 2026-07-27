@@ -129,7 +129,10 @@ def build_prompt(conn, count: int, media_type: str, vibe: str | None) -> str:
         "movie": "movies",
         "show": "TV shows",
         "both": "movies and TV shows",
-    }.get(media_type, "movies and TV shows")
+        "book": "books",
+        "game": "video games",
+        "all": "movies, TV shows, books, and video games",
+    }.get(media_type, "movies, TV shows, books, and video games")
 
     # Only recent recommendations go in the prompt (small); the full library is
     # excluded after the fact in code, not by bloating the prompt.
@@ -145,7 +148,7 @@ def build_prompt(conn, count: int, media_type: str, vibe: str | None) -> str:
 
     vibe_block = f"\nEXTRA STEER FROM ME RIGHT NOW: {vibe.strip()}\n" if vibe and vibe.strip() else ""
 
-    return f"""You are a sharp, opinionated film & TV curator. Recommend exactly {count} \
+    return f"""You are a sharp, opinionated curator for film, TV, books, and video games. Recommend exactly {count} \
 {type_phrase} I have NOT seen that match my taste below. Strongly favor lesser-known \
 or older gems over obvious blockbusters — I have a huge library and have already \
 mined the popular stuff, so DO NOT suggest mainstream/obvious titles; dig for things \
@@ -163,8 +166,8 @@ MY TASTE PROFILE:
 Already recommended to me — do NOT repeat these: {prior_block}
 {vibe_block}
 Respond with ONLY a JSON array, no prose, no markdown fences. Each element:
-{{"title": str, "year": int, "type": "movie"|"show", "reason": str (one sentence, \
-specific to my taste), "where_to_watch": str (best-guess streaming service or "rent/buy")}}
+{{"title": str, "year": int, "type": "movie"|"show"|"book"|"game", "author": str (only if a book, else omit), "reason": str (one sentence, \
+specific to my taste), "where_to_watch": str (best-guess streaming service or "rent/buy" or "bookstore" or "Steam")}}
 """
 
 
@@ -210,7 +213,8 @@ def parse_recommendations(text: str) -> list[dict[str, Any]]:
         out.append({
             "title": str(item["title"]).strip(),
             "year": year,
-            "type": mtype if mtype in ("movie", "show") else None,
+            "type": mtype if mtype in ("movie", "show", "book", "game") else None,
+            "author": (item.get("author") or "").strip() or None,
             "reason": (item.get("reason") or "").strip() or None,
             "where_to_watch": (item.get("where_to_watch") or "").strip() or None,
         })
@@ -238,13 +242,42 @@ def dedupe_and_flag(conn, recs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def enrich_recs(cfg: dict[str, Any], recs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Best-effort TMDB lookup for each rec: fills poster, genres, canonical
-    title/year, and corrects movie/show type. Silently no-ops without TMDB creds
+    """Best-effort TMDB / Google Books lookup for each rec: fills poster, genres, canonical
+    title/year, and corrects movie/show type. Silently no-ops without creds
     or on any single lookup failure (the rec just keeps the AI's raw fields)."""
     tmdb_cfg = cfg.get("tmdb") or {}
-    if not tmdb.has_credentials(tmdb_cfg):
-        return recs
+    has_tmdb = tmdb.has_credentials(tmdb_cfg)
     for rec in recs:
+        if rec.get("type") == "book":
+            try:
+                q = f"{rec['title']} {rec.get('author') or ''}".strip()
+                resp = requests.get(
+                    "https://www.googleapis.com/books/v1/volumes",
+                    params={"q": q, "maxResults": 1},
+                    timeout=5
+                )
+                if resp.status_code == 200:
+                    items = resp.json().get("items", [])
+                    if items:
+                        vol = items[0].get("volumeInfo", {})
+                        rec["title"] = vol.get("title") or rec["title"]
+                        date = vol.get("publishedDate", "")
+                        if date[:4].isdigit():
+                            rec["year"] = int(date[:4])
+                        authors = vol.get("authors", [])
+                        if authors:
+                            rec["author"] = authors[0]
+                        thumb = vol.get("imageLinks", {}).get("thumbnail")
+                        if thumb and thumb.startswith("http:"):
+                            thumb = "https:" + thumb[5:]
+                        rec["thumb"] = thumb
+                        rec["genres"] = vol.get("categories", [])
+            except Exception:
+                pass
+            continue
+            
+        if not has_tmdb:
+            continue
         try:
             data = tmdb.enrich_title(tmdb_cfg, rec["title"], prefer=rec.get("type"),
                                      with_ids=True)
@@ -264,6 +297,17 @@ def enrich_recs(cfg: dict[str, Any], recs: list[dict[str, Any]]) -> list[dict[st
 
 
 # ---------------------------------------------------------------- openrouter
+
+
+def _extract_text(content: Any) -> str:
+    """Safely extract text from OpenRouter content, which can sometimes be a list of blocks."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+    if content is None:
+        return ""
+    return str(content)
 
 
 def _chat_request(
@@ -347,7 +391,7 @@ def chat_completion(
 ) -> tuple[str, str]:
     """Convenience wrapper returning just (content, model)."""
     msg, model = _chat_request(cfg, messages, max_tokens, temperature)
-    return msg.get("content") or "", model
+    return _extract_text(msg.get("content")), model
 
 
 def call_openrouter(cfg: dict[str, Any], prompt: str) -> tuple[str, str]:
@@ -367,7 +411,7 @@ def build_chat_system(conn) -> str:
     loved = titles(p["loved"][:40]) or "none yet"
     liked = titles(p["liked"][:40]) or "none yet"
     disliked = titles(p["disliked"][:40]) or "none yet"
-    return f"""You are Praxis, a sharp, opinionated film & TV concierge for ONE user. \
+    return f"""You are Praxis, a sharp, opinionated film, TV, book, and video game concierge for ONE user. \
 You know their taste from titles they have rated in their Plex library plus \
 imported watch history. Be conversational, concise, and specific. When they ask \
 what to watch, give a few precise picks with a one-line reason each, lean toward \
@@ -408,7 +452,7 @@ CHAT_TOOLS = [
                 "type": "object",
                 "properties": {
                     "vibe": {"type": "string", "description": "Short summary of what the user wants, e.g. '80s action-adventure shows like A-Team and MacGyver' or 'a slow-burn 70s thriller'."},
-                    "type": {"type": "string", "enum": ["movie", "show", "both"], "description": "What to recommend."},
+                    "type": {"type": "string", "enum": ["movie", "show", "both", "book", "game", "all"], "description": "What to recommend."},
                     "count": {"type": "integer", "description": "How many (default 6)."},
                 },
                 "required": ["vibe"],
@@ -429,7 +473,7 @@ CHAT_TOOLS = [
                             "type": "object",
                             "properties": {
                                 "title": {"type": "string"},
-                                "media_type": {"type": "string", "enum": ["movie", "show"]},
+                                "media_type": {"type": "string", "enum": ["movie", "show", "book", "game"]},
                                 "verdict": {"type": "string", "enum": ["loved", "liked", "disliked"]},
                                 "year": {"type": "integer", "description": "Release year if known, to disambiguate remakes."},
                             },
@@ -455,7 +499,7 @@ CHAT_TOOLS = [
                             "type": "object",
                             "properties": {
                                 "title": {"type": "string"},
-                                "media_type": {"type": "string", "enum": ["movie", "show"]},
+                                "media_type": {"type": "string", "enum": ["movie", "show", "book", "game"]},
                                 "year": {"type": "integer"},
                             },
                             "required": ["title", "media_type"],
@@ -477,7 +521,7 @@ def _exec_add_watched(conn, cfg: dict[str, Any], titles: list[dict[str, Any]]) -
         title = (it.get("title") or "").strip()
         if not title:
             continue
-        mtype = it.get("media_type") if it.get("media_type") in ("movie", "show") else "show"
+        mtype = it.get("media_type") if it.get("media_type") in ("movie", "show", "book", "game") else "show"
         verdict = it.get("verdict") if it.get("verdict") in ("loved", "liked", "disliked") else "liked"
         year = it.get("year")
         key = db.find_media_key_by_title(conn, title)
@@ -521,12 +565,18 @@ def _exec_add_watchlist(conn, cfg: dict[str, Any], titles: list[dict[str, Any]])
     return [it["title"] for it in items]
 
 
-def chat(conn, cfg: dict[str, Any], messages: list[dict[str, str]]) -> dict[str, Any]:
+def chat(conn, cfg: dict[str, Any], session_id: str, content: str) -> dict[str, Any]:
     """Conversation grounded in the user's taste — and able to take actions via tools."""
+    # save user message
+    db.add_chat_message(conn, session_id, "user", content)
+    
+    # fetch history
+    history = db.get_chat_messages(conn, session_id)
+
     convo: list[dict[str, Any]] = [{"role": "system", "content": build_chat_system(conn)}]
     convo += [
         {"role": m["role"], "content": m["content"]}
-        for m in messages
+        for m in history
         if m.get("role") in ("user", "assistant") and m.get("content")
     ]
 
@@ -537,11 +587,16 @@ def chat(conn, cfg: dict[str, Any], messages: list[dict[str, str]]) -> dict[str,
         msg, model = _chat_request(cfg, convo, max_tokens=2500, temperature=0.7, tools=CHAT_TOOLS)
         tool_calls = msg.get("tool_calls") or []
         if not tool_calls:
-            return {"reply": msg.get("content") or "", "model": model,
+            reply = _extract_text(msg.get("content")).strip()
+            if not reply:
+                reply = ("Here are some picks 👇" if recommendations
+                         else "Sorry — I didn't catch that. Mind rephrasing?")
+            db.add_chat_message(conn, session_id, "assistant", reply, recommendations)
+            return {"reply": reply, "model": model,
                     "actions": actions, "recommendations": recommendations}
 
         # echo the assistant's tool-call turn back, then append each tool result
-        convo.append({"role": "assistant", "content": msg.get("content") or "",
+        convo.append({"role": "assistant", "content": _extract_text(msg.get("content")),
                       "tool_calls": tool_calls})
         for call in tool_calls:
             fn = call.get("function", {})
@@ -551,7 +606,7 @@ def chat(conn, cfg: dict[str, Any], messages: list[dict[str, str]]) -> dict[str,
             except json.JSONDecodeError:
                 args = {}
             if name == "get_recommendations":
-                mtype = args.get("type") if args.get("type") in ("movie", "show", "both") else "both"
+                mtype = args.get("type") if args.get("type") in ("movie", "show", "both", "book", "game", "all") else "all"
                 cnt = max(1, min(int(args.get("count") or 6), 15))
                 res = recommend(conn, cfg, cnt, mtype, args.get("vibe"))
                 recommendations += res.get("recommendations", [])
@@ -575,8 +630,39 @@ def chat(conn, cfg: dict[str, Any], messages: list[dict[str, str]]) -> dict[str,
                           "content": result_text})
 
     # Fell out of the loop still wanting tools — return a graceful summary
-    return {"reply": "Done." if (actions or recommendations) else "I wasn't able to finish that.",
+    reply = "Done." if (actions or recommendations) else "I wasn't able to finish that."
+    db.add_chat_message(conn, session_id, "assistant", reply, recommendations)
+    return {"reply": reply,
             "model": model, "actions": actions, "recommendations": recommendations}
+
+
+def analyze_taste(conn, cfg: dict[str, Any]) -> str:
+    """Provides a fun, opinionated AI analysis of the user's taste profile."""
+    p = build_profile(conn)
+    titles = lambda lst: ", ".join(  # noqa: E731
+        f"{e['title']}{' (' + str(e['year']) + ')' if e.get('year') else ''}" for e in lst
+    )
+    loved = titles(p["loved"][:40]) or "none yet"
+    liked = titles(p["liked"][:40]) or "none yet"
+    disliked = titles(p["disliked"][:40]) or "none yet"
+
+    prompt = f"""You are Praxis, a sharp, highly opinionated, slightly snarky but fun film, TV & book concierge.
+I want you to analyze and 'roast' my taste profile based on my ratings. 
+Write a 2-3 paragraph prose analysis of my cinematic psychology. What do my ratings say about me? What are my blind spots? Be specific, engaging, and fun.
+
+MY TASTE PROFILE:
+- Gravitates to genres: {", ".join(p["liked_genres"]) or "n/a"}
+- Avoids genres: {", ".join(p["disliked_genres"]) or "n/a"}
+- Favorite eras: {", ".join(p["favorite_decades"]) or "n/a"}
+- Loved directors: {", ".join(p["loved_directors"]) or "n/a"}
+- LOVED (two thumbs): {loved}
+- LIKED (one thumb): {liked}
+- DISLIKED (thumbs down): {disliked}
+"""
+    content, _ = call_openrouter(cfg, prompt)
+    if not content:
+        raise RecommendError("Failed to generate analysis.")
+    return content
 
 
 def recommend(conn, cfg: dict[str, Any], count: int, media_type: str,
@@ -592,6 +678,10 @@ def recommend(conn, cfg: dict[str, Any], count: int, media_type: str,
     content, model = call_openrouter(cfg, prompt)
     try:
         parsed = parse_recommendations(content)
+        # Force strict typing if requested; prevents LLM from hallucinating "movie" for famous books
+        if media_type in ("movie", "show", "book", "game"):
+            for rec in parsed:
+                rec["type"] = media_type
     except RecommendError as exc:
         fr = LAST_RESPONSE.get("finish_reason")
         snippet = (content or "")[:200].replace("\n", " ")
