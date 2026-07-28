@@ -112,3 +112,6 @@ The Chat also supports **Natural Language Actions**. You can simply type:
 ## Privacy & Architecture
 - **Tech Stack:** Python 3.11+, FastAPI, SQLite (`data/praxis.db`), Vanilla JS/CSS. No build step required.
 - **Privacy:** Built as a local-first hub. Your database, watch history, and API keys are 100% local and git-ignored. The only data that leaves your network are anonymous media titles (e.g., querying TMDB for "The Matrix" or sending an anonymous list of your rated games to OpenRouter). No personally identifiable information, IP addresses, or library credentials ever leave your machine.
+
+---
+*Built with the assistance of Claude and Gemini.*
